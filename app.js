@@ -6,7 +6,7 @@
 'use strict';
 
 const KEY = 'ewf-subscription-prototype';
-const VERSION = 1;
+const VERSION = 2;
 const START_DAY = '2026-10-07';
 const DAY = 86400000;
 const ME = 'Dev Patel';
@@ -111,6 +111,12 @@ const INQ_STATUS = {
 const INTEREST = { FreeTrial: 'Free trial', Demo: 'Just a demo', Question: 'Question' };
 const MODEL = { PerGuard: 'Per guard', AnnualLicence: 'Annual licence', Custom: 'Custom' };
 const AG_STATUS = { Trial: 'Trial', Active: 'Active', TrialEnded: 'Trial ended', Suspended: 'Suspended', Cancelled: 'Cancelled' };
+// Billing: the app works out the amount; Xero holds the real invoice. `status` is what our app last saw in Xero.
+const INV_KIND = { Initial: 'First invoice', Monthly: 'Monthly usage', Renewal: 'Renewal', Manual: 'One-off' };
+const INV_ST = { Queued: ['Not in Xero', 'p-grey'], Draft: ['Draft in Xero', 'p-blue'], Awaiting: ['Awaiting payment', 'p-violet'], Overdue: ['Overdue', 'p-red'], Paid: ['Paid', 'p-green'], Void: ['Voided', 'p-line'] };
+const XSTATUS = { DRAFT: 'Draft', AUTHORISED: 'Awaiting', PAID: 'Paid', VOIDED: 'Void' };
+const XERO_TEXT = { DRAFT: 'Draft', AUTHORISED: 'Approved and sent: awaiting payment', PAID: 'Paid', VOIDED: 'Voided' };
+const MAIL_KIND = { sales: ['Sales', 'p-violet'], customer: ['Customer', 'p-teal'], xero: ['From Xero', 'p-blue'] };
 const TEAM_SIZES = ['1 – 20 employees', '21 – 50 employees', '51 – 200 employees', '200+ employees'];
 const TIMEZONES = ['AUS Eastern Standard Time', 'E. Australia Standard Time', 'Cen. Australia Standard Time', 'W. Australia Standard Time', 'Tasmania Standard Time', 'New Zealand Standard Time'];
 
@@ -130,6 +136,9 @@ const money = (n, cents) => '$' + num(n).toLocaleString('en-AU', { minimumFracti
 const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
 const realTime = () => { const d = new Date(); return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); };
 const stamp = t => state.today + ' ' + (t || realTime());
+const round2 = n => Math.sign(n) * Math.round(Math.abs(n) * 100 + 1e-7) / 100;   // half-up to the cent
+const prevMonth = day => { const [y, m] = day.split('-').map(Number); return new Date(Date.UTC(y, m - 2, 1)).toISOString().slice(0, 7); };   // 'YYYY-MM' of the month before `day`
+const monthLabel = ym => new Date(utc(ym + '-01')).toLocaleDateString('en-AU', { month: 'long', year: 'numeric', timeZone: 'UTC' });
 const firstName = n => String(n || '').trim().split(/\s+/)[0] || 'there';
 const pill = (txt, cls) => `<span class="pill ${cls}">${esc(txt)}</span>`;
 const icon = {
@@ -138,7 +147,7 @@ const icon = {
 
 /* ================= state ================= */
 let state;
-const ui = { inqFilter: 'All', inqSearch: '', custFilter: 'All', custSearch: '', inboxFilter: 'All', calcGuards: 30, calcAnnual: false, formSent: null };
+const ui = { inqFilter: 'All', inqSearch: '', custFilter: 'All', custSearch: '', billFilter: 'All', inboxFilter: 'All', calcGuards: 30, calcAnnual: false, formSent: null };
 
 function load() {
     try {
@@ -162,8 +171,12 @@ function agreementDefaults(o) {
 function companyDefaults(o) {
     return Object.assign({
         phone: '', country: 'Australia', timeZone: 'AUS Eastern Standard Time', activated: true,
-        guardsThis: 0, guardsLast: 0, agreement: null, overrides: [], history: [], requested: [],
+        guardsThis: 0, guardsLast: 0, agreement: null, overrides: [], history: [], requested: [], billing: null,
     }, o);
+}
+function billOf(c) {   // billing details; created on first use so every customer has them
+    if (!c.billing) c.billing = { legalName: c.name, email: c.adminEmail, abn: '', address: '', chargeGst: c.country !== 'New Zealand', ref: '', xeroContactId: null };
+    return c.billing;
 }
 function hist(c, action, detail, reason, at, system) {
     c.history.unshift({ at: at || stamp(), action, detail: detail || '', reason: reason || '', by: system ? 'System (nightly job)' : ME, system: !!system });
@@ -172,8 +185,9 @@ function hist(c, action, detail, reason, at, system) {
 function seed() {
     state = {
         v: VERSION, today: START_DAY, nextId: 100, viewAs: 'c-southern',
-        settings: { salesInbox: 'engageworkforceofficial@gmail.com', minMonthly: 99, annualMonths: 10, notifyCustomers: false, enforce: true, matrix: {} },
-        inquiries: [], companies: [], emails: [], jobLog: [],
+        settings: { salesInbox: 'engageworkforceofficial@gmail.com', minMonthly: 99, annualMonths: 10, notifyCustomers: false, enforce: true, matrix: {},
+            billing: { supplier: 'Engage WorkForce Pty Ltd', xeroOrg: 'Engage WorkForce Pty Ltd (Xero demo company)', xeroOk: true, accountCode: '200', terms: 14, gstRate: 10, billingDay: 1, renewalLeadDays: 30 } },
+        inquiries: [], companies: [], emails: [], jobLog: [], invoices: [], xeroSeq: 40,
     };
     const q = o => state.inquiries.push(Object.assign({ phone: '', teamSize: '', message: '', sourcePage: '/free-trial', notes: '', convertedCompanyId: null, preferredTrialDays: null, createdMs: 0 }, o));
     q({ id: 'q-redline', createdAt: '2026-10-07 09:12', fullName: 'Ava Wilson', companyName: 'Redline Security', email: 'ava@redline.example', phone: '0412 555 201', teamSize: TEAM_SIZES[1], selectedPlan: 'Professional', interest: 'FreeTrial', preferredTrialDays: 14, message: 'We roster about 35 guards across 9 sites and want to get off spreadsheets before Christmas.', status: 'New' });
@@ -189,12 +203,14 @@ function seed() {
     hist(eng, 'Company created', 'Created before agreements existed', '', '2025-03-12 10:00');
 
     const har = c({ id: 'c-harbour', name: 'Harbour Guard Services', adminName: 'Priya Nair', adminEmail: 'priya@harbourguard.example', phone: '0419 225 604', createdAt: '2026-07-01', guardsThis: 42, guardsLast: 39,
+        billing: { legalName: 'Harbour Guard Services Pty Ltd', email: 'accounts@harbourguard.example', abn: '12 345 678 901', address: '14 Wharf Rd, Newcastle NSW 2300', chargeGst: true, ref: '', xeroContactId: 'XC-harbour' },
         agreement: agreementDefaults({ plan: 'Professional', status: 'Active', trialStart: '2026-07-01', trialDays: 14, trialEnd: '2026-07-15', subscribedAt: '2026-07-14', model: 'PerGuard', rate: 10, term: 'Monthly', billingNotes: 'Invoice on the 1st, 14-day terms.', inquiryId: 'q-harbour', day3Sent: true, day1Sent: true }) });
     hist(har, 'Created', 'Trial 14 days · Professional · Per guard $10', 'Created from inquiry (Harbour Guard Services)', '2026-07-01 10:20');
     hist(har, 'Reminder sent', 'Trial ends in 3 days: sales inbox notified', '', '2026-07-12 05:00', true);
     hist(har, 'Converted to paid', 'Status Trial → Active · billed monthly', 'Signed after trial review call', '2026-07-14 15:05');
 
     const coa = c({ id: 'c-coast', name: 'Coastline Protective Group', adminName: 'Daniel Reyes', adminEmail: 'daniel@coastline.example', phone: '0408 330 552', createdAt: '2026-02-01', guardsThis: 58, guardsLast: 51,
+        billing: { legalName: 'Coastline Protective Group Pty Ltd', email: 'accounts@coastline.example', abn: '98 765 432 109', address: '2 Marine Pde, Southport QLD 4215', chargeGst: true, ref: 'PO-2026-014', xeroContactId: 'XC-coast' },
         agreement: agreementDefaults({ plan: 'Professional', status: 'Active', subscribedAt: '2026-02-01', model: 'AnnualLicence', rate: 10, term: 'AnnualPrepaid', includedGuards: 50, renewalDate: '2027-02-01', billingNotes: 'Annual licence, prepaid. True-up at renewal.' }) });
     hist(coa, 'Created', 'Active · Professional · Annual licence, 50 guards, $5,000/yr', 'Signed annual licence after demo', '2026-02-01 09:30');
 
@@ -207,6 +223,19 @@ function seed() {
         agreement: agreementDefaults({ plan: 'Professional', status: 'TrialEnded', trialStart: '2026-09-28', trialDays: 7, trialEnd: '2026-10-05', model: 'PerGuard', rate: 10, term: 'Monthly', inquiryId: 'q-metro', day3Sent: true, day1Sent: true, endedNotified: true }) });
     hist(met, 'Created', 'Trial 7 days · Professional · Per guard $10', 'Created from inquiry (Metro Event Security)', '2026-09-28 09:40');
     hist(met, 'Trial ended', 'Trial → Trial ended (no subscription yet). Nothing locked.', '', '2026-10-05 05:00', true);
+
+    // Seeded invoices, so Billing is not empty on first load: one paid, one already overdue, one waiting as a Xero draft.
+    const sinv = (co, kind, key, label, lines, issue, n, xs, paidAt) => state.invoices.push({
+        id: nid('i'), companyId: co.id, kind, periodKey: key, periodLabel: label, createdAt: issue, issueDate: issue, dueDate: addDays(issue, 14), lines,
+        chargeGst: true, gstRate: 10, status: XSTATUS[xs], blocked: '', sig: agSig(co.agreement), syncedAt: issue + ' 05:00',
+        xero: { id: 'xero-' + n, number: 'INV-' + String(n).padStart(4, '0'), status: xs, sentAt: xs === 'DRAFT' ? null : issue, paidAt: paidAt || null } });
+    const usage = (n, lab) => [{ desc: `Professional — guards scheduled in ${lab}`, qty: n, unit: 10 }];
+    sinv(har, 'Monthly', '2026-07', 'July 2026', usage(38, 'July 2026'), '2026-08-01', 31, 'PAID', '2026-08-12');
+    sinv(har, 'Monthly', '2026-08', 'August 2026', usage(41, 'August 2026'), '2026-09-01', 36, 'AUTHORISED');
+    sinv(har, 'Monthly', '2026-09', 'September 2026', usage(39, 'September 2026'), '2026-10-01', 39, 'DRAFT');
+    sinv(coa, 'Initial', 'initial', '12 months from 1 Feb 2026', [{ desc: 'Professional annual licence, up to 50 guards — 12 months from 1 Feb 2026', qty: 1, unit: 5000 }], '2026-02-01', 12, 'PAID', '2026-02-10');
+    hist(har, 'Xero update', 'INV-0036: Draft → Awaiting payment (August 2026)', '', '2026-09-02 05:00', true);
+    hist(har, 'Invoice created in Xero', 'INV-0039 · Monthly usage · September 2026 · $429.00 incl. GST · Draft', '', '2026-10-01 05:00', true);
 
     emailLead(inq('q-redline'), '2026-10-07 09:12');
     emailRequesterConfirm(inq('q-redline'), '2026-10-07 09:12');
@@ -251,6 +280,30 @@ function pricingSelfCheck() {
     return { ok: rows.length + 1 - fails.length, total: rows.length + 1, fails };
 }
 
+/* ================= invoice maths (GST once per invoice, half-up to the cent) ================= */
+function calcInvoice(lines, chargeGst, ratePct) {
+    const subtotal = round2(lines.reduce((t, l) => t + round2(num(l.qty) * num(l.unit)), 0));
+    const gst = chargeGst ? round2(subtotal * num(ratePct) / 100) : 0;
+    return { subtotal, gst, total: round2(subtotal + gst) };
+}
+// Runs on every load of the Overview page. The cases are the ones written in docs/Subscription-Invoicing-Plan.md.
+function invoiceSelfCheck() {
+    const fails = [];
+    const eq = (name, got, exp) => { if (JSON.stringify(got) !== JSON.stringify(exp)) fails.push(`${name}: got ${JSON.stringify(got)}, expected ${JSON.stringify(exp)}`); };
+    const one = u => [{ qty: 1, unit: u }];
+    eq('annual $3,000 + GST', calcInvoice(one(3000), true, 10), { subtotal: 3000, gst: 300, total: 3300 });
+    eq('minimum $99 + GST', calcInvoice(one(99), true, 10), { subtotal: 99, gst: 9.9, total: 108.9 });
+    eq('negotiated $2,800 + GST', calcInvoice(one(2800), true, 10), { subtotal: 2800, gst: 280, total: 3080 });
+    eq('$123.45 rounds half-up', calcInvoice(one(123.45), true, 10), { subtotal: 123.45, gst: 12.35, total: 135.8 });
+    eq('GST switched off', calcInvoice(one(3000), false, 10), { subtotal: 3000, gst: 0, total: 3000 });
+    eq('discount line', calcInvoice([{ qty: 1, unit: 3000 }, { qty: 1, unit: -300 }], true, 10), { subtotal: 2700, gst: 270, total: 2970 });
+    const fake = g => ({ guardsLast: g, guardsThis: g, agreement: { plan: 'Starter', model: 'PerGuard', rate: 6, minMonthly: 99 } });
+    eq('14 guards at $6 hits the minimum', calcInvoice(usageLines(fake(14), 'September 2026'), true, 10).total, 108.9);
+    eq('30 guards at $6', calcInvoice(usageLines(fake(30), 'September 2026'), true, 10).total, 198);
+    fails.forEach(f => console.error('Invoice check failed: ' + f));
+    return { ok: 8 - fails.length, total: 8, fails };
+}
+
 /* ================= features (plan defaults ± overrides) ================= */
 const minPlanOf = f => f.min === 'Always' ? 'Always' : (state.settings.matrix[f.key] || f.min);
 function planDefault(key, plan) {
@@ -287,7 +340,7 @@ function emailBody(o) {
             ${o.button ? `<p><button type="button" class="em-btn" data-act="${esc(o.button.act)}" data-id="${esc(o.button.id || '')}">${esc(o.button.label)}</button></p>` : ''}
             ${o.callout ? `<div class="em-callout">${esc(o.callout)}</div>` : ''}
         </div>
-        <div class="em-foot">Engage WorkForce · Workforce management for security operations · Sent from no-reply@engageworkforce.com.au</div>
+        <div class="em-foot">${o.foot ? esc(o.foot) : 'Engage WorkForce · Workforce management for security operations · Sent from no-reply@engageworkforce.com.au'}</div>
     </div>`;
 }
 function pushEmail(to, subject, kind, body, at) {
@@ -343,6 +396,84 @@ function emailAccountReady(c) {
     }));
 }
 
+/* ================= billing engine: we work out the amount, Xero holds the invoice ================= */
+const bset = () => state.settings.billing;
+const invById = id => state.invoices.find(i => i.id === id);
+const invFor = (c, kind, key) => state.invoices.find(i => i.companyId === c.id && i.kind === kind && i.periodKey === key);   // idempotency key
+function agSig(a) { return a ? [a.plan, a.model, a.rate, a.minMonthly, a.includedGuards, a.annualAmount].join('|') : ''; }
+const invTotals = i => calcInvoice(i.lines, i.chargeGst, i.gstRate);
+const invLabel = i => i.periodLabel === INV_KIND[i.kind] ? INV_KIND[i.kind] : `${INV_KIND[i.kind]} · ${i.periodLabel}`;
+function invState(i) { return i.status === 'Awaiting' && i.dueDate < state.today ? 'Overdue' : i.status; }   // overdue is derived, never stored
+const overdueOf = c => state.invoices.filter(i => i.companyId === c.id && invState(i) === 'Overdue');
+
+// Per-guard clients are billed in arrears on guards scheduled; the minimum replaces the line when it is higher.
+function usageLines(c, label) {
+    const a = c.agreement, g = c.guardsLast || c.guardsThis, raw = g * num(a.rate), min = num(a.minMonthly);
+    if (raw < min) return [{ desc: `${a.plan} — minimum monthly charge (${plural(g, 'guard')} scheduled in ${label} × ${money(a.rate)} = ${money(raw, true)})`, qty: 1, unit: min }];
+    return [{ desc: `${a.plan} — guards scheduled in ${label}`, qty: g, unit: num(a.rate) }];
+}
+function prepaidLines(c, from) {   // annual licence or custom agreement: one line for the year
+    const a = c.agreement, p = priceOf(c);
+    const what = a.model === 'Custom' ? `${a.plan} agreement` : `${a.plan} annual licence, up to ${a.includedGuards} guards`;
+    return [{ desc: `${what} — 12 months from ${fmtDate(from)}`, qty: 1, unit: p.annual }];
+}
+function newInvoice(c, kind, key, label, lines, issue) {
+    const b = billOf(c), day = issue || state.today;
+    const inv = { id: nid('i'), companyId: c.id, kind, periodKey: key, periodLabel: label, createdAt: state.today, issueDate: day, dueDate: addDays(day, bset().terms),
+        lines, chargeGst: b.chargeGst, gstRate: bset().gstRate, status: 'Queued', xero: null, blocked: '', sig: agSig(c.agreement), syncedAt: '' };
+    state.invoices.unshift(inv);
+    return inv;
+}
+function missingFor(c, inv) {   // what Xero's contact and the invoice need before we push
+    const b = billOf(c), m = [];
+    if (!b.legalName.trim()) m.push('a billing name');
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(b.email.trim())) m.push('a billing email');
+    if (invTotals(inv).total >= 1000 && !b.abn.trim()) m.push('the ABN (needed on invoices of $1,000 or more)');
+    return m;
+}
+// Mock of "create the Draft in Xero". Idempotent: an invoice already in Xero is never created twice.
+function createInXero(inv, system) {
+    if (inv.xero) return { ok: true };
+    const c = comp(inv.companyId), at = system ? state.today + ' 05:00' : undefined;
+    const miss = missingFor(c, inv);
+    if (miss.length) { inv.blocked = 'Missing ' + miss.join(', ') + '.'; return { ok: false, why: inv.blocked, kind: 'data' }; }
+    if (!bset().xeroOk) { inv.blocked = 'Xero connection needs reconnecting.'; return { ok: false, why: inv.blocked, kind: 'xero' }; }
+    const b = billOf(c), t = invTotals(inv), newContact = !b.xeroContactId;
+    if (newContact) b.xeroContactId = 'XC-' + c.id;
+    state.xeroSeq++;
+    inv.xero = { id: 'xero-' + state.xeroSeq, number: 'INV-' + String(state.xeroSeq).padStart(4, '0'), status: 'DRAFT', sentAt: null, paidAt: null };
+    inv.status = 'Draft'; inv.blocked = ''; inv.syncedAt = at || stamp();
+    hist(c, 'Invoice created in Xero', `${inv.xero.number} · ${invLabel(inv)} · ${money(t.total, true)}${inv.chargeGst ? ' incl. GST' : ' (no GST)'} · Draft${newContact ? ' · new Xero contact' : ''}`, '', at, system);
+    return { ok: true };
+}
+// Mock of "read the invoice back from Xero". The nightly job does this for every open invoice.
+function syncFromXero(inv, system) {
+    if (!inv.xero || !bset().xeroOk) return false;
+    const next = XSTATUS[inv.xero.status], at = system ? state.today + ' 05:00' : undefined;
+    inv.syncedAt = at || stamp();
+    if (next === inv.status) return false;
+    const was = INV_ST[inv.status][0];
+    inv.status = next;
+    hist(comp(inv.companyId), 'Xero update', `${inv.xero.number}: ${was} → ${INV_ST[next][0]}${next === 'Paid' ? ' on ' + fmtDate(inv.xero.paidAt) : ''}`, '', at, system);
+    return true;
+}
+function emailXeroInvoice(inv) {
+    const c = comp(inv.companyId), b = billOf(c), t = invTotals(inv);
+    pushEmail(b.email, `Invoice ${inv.xero.number} from ${bset().supplier}`, 'xero', emailBody({
+        kicker: 'Invoice', h1: `Invoice ${inv.xero.number} for ${money(t.total, true)}`,
+        paras: [`Hi ${firstName(c.adminName)}, here is your invoice from ${bset().supplier}.`],
+        rows: [['Amount due', `${money(t.total, true)}${inv.chargeGst ? ' (includes GST ' + money(t.gst, true) + ')' : ''}`], ['Due date', fmtDate(inv.dueDate)], ['For', invLabel(inv)], ['Reference', inv.xero.number]],
+        button: { label: 'View and pay online', act: 'open-xero', id: inv.id },
+        callout: 'Pay by bank transfer, or online if you see a Pay now button. Questions? Reply to this email.',
+        foot: `Sent through Xero on behalf of ${bset().supplier}`,
+    }));
+}
+function nextBillingDay() {
+    const [y, m] = state.today.split('-').map(Number), d = Number(state.today.slice(8));
+    const ny = d >= bset().billingDay && m === 12 ? y + 1 : y, nm = d >= bset().billingDay ? (m % 12) + 1 : m;
+    return `${ny}-${String(nm).padStart(2, '0')}-${String(bset().billingDay).padStart(2, '0')}`;
+}
+
 /* ================= nightly lifecycle job (simulated) ================= */
 function runNightly(day) {
     const t = day + ' 05:00';
@@ -369,16 +500,49 @@ function runNightly(day) {
         });
     });
 
+    // ---- billing (never changes a subscription status) ----
+    const bill = [], bs = bset();
+    let billed = 0;
+    state.invoices.filter(i => i.status === 'Queued' && i.blocked).forEach(i => {            // retry anything that was waiting on data or on Xero
+        if (createInXero(i, true).ok) bill.push(['Retry worked: draft created in Xero', `${comp(i.companyId).name} — ${invLabel(i)} · ${money(invTotals(i).total, true)}`]);
+    });
+    state.invoices.filter(i => i.xero && !['Paid', 'Void'].includes(i.status)).forEach(i => {   // read open invoices back from Xero
+        if (syncFromXero(i, true)) bill.push([i.status === 'Paid' ? 'Paid in Xero' : 'Updated in Xero', `${comp(i.companyId).name} — ${i.xero.number} is now ${INV_ST[i.status][0].toLowerCase()}`]);
+    });
+    state.companies.forEach(c => {
+        const a = c.agreement; if (!a || a.status !== 'Active') return;
+        let kind, key, label, lines;
+        if (a.model === 'PerGuard') {      // on the billing day, bill last month's guards
+            if (Number(day.slice(8)) !== bs.billingDay || !a.subscribedAt || a.subscribedAt >= day.slice(0, 7) + '-01') return;
+            kind = 'Monthly'; key = prevMonth(day); label = monthLabel(key); lines = usageLines(c, label);
+        } else {                           // annual licence / custom: a draft some days before the renewal date
+            const left = a.renewalDate ? diffDays(a.renewalDate, day) : -1;
+            if (left < 0 || left > bs.renewalLeadDays) return;
+            kind = 'Renewal'; key = 'renewal-' + a.renewalDate; label = 'Renewal ' + fmtDate(a.renewalDate); lines = prepaidLines(c, a.renewalDate);
+        }
+        if (invFor(c, kind, key)) return;   // idempotent: running the job twice never doubles an invoice
+        const inv = newInvoice(c, kind, key, label, lines, day), r = createInXero(inv, true);
+        if (r.ok) billed++;
+        bill.push([r.ok ? 'Draft created in Xero: review and send' : 'Waiting, not in Xero yet', `${c.name} — ${invLabel(inv)} · ${money(invTotals(inv).total, true)}${r.ok ? '' : ' · ' + r.why}`]);
+    });
+    state.invoices.filter(i => i.status === 'Awaiting' && i.dueDate < day && (!i.overdueNoted || diffDays(day, i.overdueNoted) >= 7)).forEach(i => {
+        i.overdueNoted = day;
+        bill.push(['Overdue', `${comp(i.companyId).name} — ${i.xero.number} · ${money(invTotals(i).total, true)} · ${plural(diffDays(day, i.dueDate), 'day')} late. Xero sends its own reminders.`]);
+        hist(comp(i.companyId), 'Invoice overdue', `${i.xero.number} was due ${fmtDate(i.dueDate)}. Nothing is locked.`, '', t, true);
+    });
+    const stuck = state.invoices.filter(i => i.status === 'Queued' && i.blocked).length;
+    if (stuck && !bs.xeroOk) bill.push(['Xero connection', `${plural(stuck, 'invoice')} waiting. Reconnect Xero in Settings; they are retried every night.`]);
     const line = c => { const a = c.agreement; return `${c.name} — ${a.plan}, ends ${fmtDate(a.trialEnd)} · ${c.adminName}, ${c.phone || c.adminEmail}`; };
-    if (due3.length || due1.length || expiring.length) {
-        const parts = [];
+    if (due3.length || due1.length || expiring.length || bill.length) {
+        const parts = [], trialsOnly = due3.length || due1.length || expiring.length;
         if (due3.length + due1.length) parts.push(plural(due3.length + due1.length, 'trial') + ' ending soon');
         if (expiring.length) parts.push(plural(expiring.length, 'feature override') + ' expiring');
+        if (bill.length) parts.push(plural(bill.length, 'billing item'));
         pushEmail(state.settings.salesInbox, `Nightly digest — ${fmtDate(day)}: ${parts.join(', ')}`, 'sales', emailBody({
-            kicker: 'Nightly digest', h1: due3.length + due1.length ? 'Trials needing a call' : 'Feature overrides expiring',
+            kicker: 'Nightly digest', h1: due3.length + due1.length ? 'Trials needing a call' : expiring.length ? 'Feature overrides expiring' : 'Billing to review',
             rows: [...due1.map(c => ['Ends tomorrow', line(c)]), ...due3.map(c => ['Ends in 3 days', line(c)]),
-                ...expiring.map(x => ['Feature override expiring', `${x.c.name} — ${BY_KEY[x.o.key].name} ${x.o.granted ? 'access' : 'removal'} ends ${fmtDate(x.o.expiresAt)}${x.l === 0 ? ' (today)' : ''}`])],
-            button: { label: 'Open in SuperAdmin › Customers', act: 'goto-cust', id: '' },
+                ...expiring.map(x => ['Feature override expiring', `${x.c.name} — ${BY_KEY[x.o.key].name} ${x.o.granted ? 'access' : 'removal'} ends ${fmtDate(x.o.expiresAt)}${x.l === 0 ? ' (today)' : ''}`]), ...bill],
+            button: trialsOnly ? { label: 'Open in SuperAdmin › Customers', act: 'goto-cust', id: '' } : { label: 'Open in SuperAdmin › Billing', act: 'goto-bill', id: '' },
             callout: 'Nothing is locked automatically. Convert, extend or follow up from the Customers page.',
         }), t);
     }
@@ -401,18 +565,18 @@ function runNightly(day) {
             paras: [`Your trial for ${c.name} ended on ${fmtDate(c.agreement.trialEnd)}. You can still log in; nothing has been locked or deleted.`, "We'll call you to talk about the right plan."],
         }), t));
     }
-    const summary = `${fmtDate(day)}: ${due3.length + due1.length} reminder(s), ${ended.length} trial(s) ended, ${expiring.length} override(s) expiring`;
+    const summary = `${fmtDate(day)}: ${due3.length + due1.length} reminder(s), ${ended.length} trial(s) ended, ${expiring.length} override(s) expiring, ${billed} invoice(s) created, ${bill.length} billing item(s)`;
     state.jobLog.unshift(summary);
-    return { reminders: due3.length + due1.length, ended: ended.length };
+    return { reminders: due3.length + due1.length, ended: ended.length, billed };
 }
 function advance(days) {
-    let r = 0, e = 0;
+    let r = 0, e = 0, b = 0;
     for (let i = 0; i < days; i++) {
         state.today = addDays(state.today, 1);
-        const x = runNightly(state.today); r += x.reminders; e += x.ended;
+        const x = runNightly(state.today); r += x.reminders; e += x.ended; b += x.billed;
     }
     save(); render();
-    toast(`Nightly job ran for ${plural(days, 'day')}: ${plural(r, 'reminder')}, ${plural(e, 'trial')} ended. Today is ${fmtDay(state.today)}.`);
+    toast(`Nightly job ran for ${plural(days, 'day')}: ${plural(r, 'reminder')}, ${plural(e, 'trial')} ended, ${plural(b, 'invoice')} created in Xero. Today is ${fmtDay(state.today)}.`);
 }
 
 /* ================= descriptive helpers ================= */
@@ -478,12 +642,14 @@ function renderBar(path) {
 }
 function saChrome(active) {
     const newCount = state.inquiries.filter(q => q.status === 'New').length;
+    const overdueCount = state.invoices.filter(i => invState(i) === 'Overdue').length;
     return `<div class="app-head">
         <a class="brand" href="#/sa/inquiries"><img src="ewf-shield.jpg" alt=""><span>ENGAGE <b>WORKFORCE</b></span></a>
         <nav class="app-nav" aria-label="SuperAdmin">
             <span class="nav-i"><span class="nav-a dim" title="Existing page, unchanged">SuperAdmin Hub</span></span>
             <span class="nav-i"><a class="nav-a ${active === 'inquiries' ? 'on' : ''}" href="#/sa/inquiries">Inquiries${newCount ? `<span class="nav-badge">${newCount}</span>` : ''}</a></span>
             <span class="nav-i"><a class="nav-a ${active === 'customers' ? 'on' : ''}" href="#/sa/customers">Customers</a></span>
+            <span class="nav-i"><a class="nav-a ${active === 'billing' ? 'on' : ''}" href="#/sa/billing">Billing${overdueCount ? `<span class="nav-badge">${overdueCount}</span>` : ''}</a></span>
         </nav>
         <span class="app-user"><span class="av">DP</span>${ME} · SuperAdmin</span>
     </div>`;
@@ -491,7 +657,7 @@ function saChrome(active) {
 
 /* ================= views: overview ================= */
 function viewOverview() {
-    const chk = pricingSelfCheck();
+    const chk = pricingSelfCheck(), ichk = invoiceSelfCheck();
     const step = (n, title, text, href, label, act) => `<div class="step"><span class="num">${n}</span><h4>${title}</h4><p>${text}</p>
         ${act ? `<button class="btn btn-sm btn-pl" data-act="${act}" data-id="1">${label}</button>` : `<a class="btn btn-sm btn-pl" href="${href}">${label}</a>`}</div>`;
     const decisions = [
@@ -507,11 +673,18 @@ function viewOverview() {
         ['10', 'Contractor management', 'Listed as "coming soon"', 'Pricing comparison'],
         ['11', 'Trial features', "The plan's own set; sales can add features until trial end", 'Create customer › Features'],
         ['12', 'Protected pages', 'Features inside them show as "Recorded only"', 'Customer view'],
+        ['I1', 'GST', `${bset().gstRate}% added on top; a tick per customer turns it off`, 'Customer › Billing'],
+        ['I3', 'Invoicing system', "Xero (Engage WorkForce's own org): the app creates a Draft, you approve and send it in Xero", 'SuperAdmin › Billing'],
+        ['I4', 'Payment terms', `${bset().terms} days`, 'Settings'],
+        ['I5–I7', 'When invoices are made', `Prepaid: on Convert to paid. Per guard: on the ${bset().billingDay}${bset().billingDay === 1 ? 'st' : 'th'} for last month. Renewals: ${bset().renewalLeadDays} days before`, 'Convert to paid · +1 day'],
+        ['I8', 'Overdue', 'A label and a digest line. Never locks anyone', 'SuperAdmin › Billing'],
+        ['I9', 'Needed before Xero', 'Billing name and email; ABN from $1,000', 'Customer › Billing details'],
+        ['I14', 'Online payment', 'None built: Xero\'s own "Pay now" if their Xero has it on', '—'],
     ];
     return `<div class="page">
         <div class="ov-hero">
             <h1>Free Trial & Subscription — clickable prototype</h1>
-            <p>Walk the whole journey: a visitor asks for a trial, sales sees the inquiry, SuperAdmin creates the customer with a negotiated price and features, the customer uses only what their plan includes, and the nightly job chases the trial. All data here is fake and lives only in this browser.</p>
+            <p>Walk the whole journey: a visitor asks for a trial, sales sees the inquiry, SuperAdmin creates the customer with a negotiated price and features, the customer uses only what their plan includes, the nightly job chases the trial, and invoices are raised in Xero. All data here is fake and lives only in this browser, and Xero is simulated.</p>
         </div>
         <div class="steps" style="margin-bottom:18px">
             ${step(1, 'Visitor picks a plan', 'New pricing page: per guard scheduled, $' + state.settings.minMonthly + ' minimum, annual option, calculator, comparison table.', '#/pricing', 'Open pricing')}
@@ -521,6 +694,7 @@ function viewOverview() {
             ${step(5, 'Customer uses their plan', 'Topbar hides what the plan lacks; a locked page shows "Upgrade to unlock".', '#/app/insighthub', 'View as customer')}
             ${step(6, 'Nightly job chases trials', 'Reminders at 3 days and 1 day, then "follow up now". Nothing locks.', '', '+1 day', 'advance')}
             ${step(7, 'Convert, extend or change', 'Customers page: convert to paid, extend, change plan, price or features.', '#/sa/customers', 'Open customers')}
+            ${step(8, 'Invoice through Xero', 'The app works out the amount and creates a Draft in Xero. You approve and send it there; the app reads the status back.', '#/sa/billing', 'Open billing')}
         </div>
         <div class="two">
             <div class="box"><div class="box-h"><h3>Things to try</h3></div><div class="box-b"><ol class="try">
@@ -532,6 +706,9 @@ function viewOverview() {
                 <li>Settings → change the minimum to $250: pricing page, calculator and price preview all follow.</li>
                 <li>Settings → move Xero to Enterprise: the pricing comparison and customer topbars follow.</li>
                 <li>Settings → turn page enforcement off: nothing is hidden (how it ships until the click-through).</li>
+                <li><a href="#/sa/billing">Billing</a>: Harbour's August invoice is overdue and September is a Draft in Xero. Open September → <b>Act as Xero</b> → Approve, then Record payment, then <b>Sync from Xero</b>.</li>
+                <li>Create a customer from the Redline inquiry as <b>Paid</b> on an <b>Annual licence</b>: a Draft is created in Xero straight away. Clear the billing email or leave the ABN blank on a $1,000+ invoice to see it wait with a reason.</li>
+                <li>Press <b>+1 day</b> until 1 Nov: Harbour gets October's usage invoice as a Draft in Xero, once. Settings → <b>Xero connection lapsed</b> first: it waits, and is retried the night after you reconnect.</li>
             </ol></div></div>
             <div class="box"><div class="box-h"><h3>Open decisions shown here</h3></div><div class="tbl-wrap"><table class="tbl">
                 <thead><tr><th>#</th><th>Decision</th><th>Shown as</th><th>Try it in</th></tr></thead>
@@ -542,6 +719,10 @@ function viewOverview() {
             <b>Pricing formula check:</b> <span class="${chk.fails.length ? 'check-bad' : 'check-ok'}">${chk.ok} of ${chk.total} checks match the plan's worked table</span>
             ${chk.fails.length ? `<ul>${chk.fails.map(f => `<li>${esc(f)}</li>`).join('')}</ul>` : ''}
             <div class="sub">Rows: 10, 25, 30, 50, 100 and 250 guards × Starter/Professional × monthly/annual licence, plus "a negotiated annual amount overrides the formula".</div>
+            <div style="margin-top:8px"><b>Invoice maths check:</b> <span class="${ichk.fails.length ? 'check-bad' : 'check-ok'}">${ichk.ok} of ${ichk.total} checks pass</span>
+            ${ichk.fails.length ? `<ul>${ichk.fails.map(f => `<li>${esc(f)}</li>`).join('')}</ul>` : ''}
+            <div class="sub">GST once per invoice, half-up to the cent: $3,000 → $3,300 · $99 minimum → $108.90 · $2,800 → $3,080 · $123.45 → GST $12.35 · GST off · a discount line.</div></div>
+            <div class="sub" style="margin-top:8px"><b>Simplified in the prototype:</b> Xero is simulated (use "Act as Xero" on an invoice); the guard count is the "last month" figure on the customer; the first per-guard invoice is created on the next billing day, because per-guard clients are billed after the month ends.</div>
             ${state.jobLog.length ? `<div class="sub" style="margin-top:8px"><b>Nightly job log:</b> ${state.jobLog.slice(0, 5).map(esc).join(' · ')}</div>` : ''}
         </div></div>
     </div>`;
@@ -743,12 +924,12 @@ function viewInbox(id) {
     const count = k => state.emails.filter(e => k === 'All' || e.kind === k).length;
     return `<div class="page">
         <div class="page-head"><div><div class="eyebrow">Prototype</div><h1>Inbox</h1><p>Every email the system would send, at the moment it would send it. Sales inbox: ${esc(state.settings.salesInbox)}.</p></div></div>
-        <div class="chips">${[['All', 'All'], ['sales', 'Sales inbox'], ['customer', 'To customers']].map(([k, l]) => `<button class="chip ${ui.inboxFilter === k ? 'on' : ''}" data-act="inbox-filter" data-id="${k}">${l}<b>${count(k)}</b></button>`).join('')}</div>
+        <div class="chips">${[['All', 'All'], ['sales', 'Sales inbox'], ['customer', 'To customers'], ['xero', 'Sent by Xero']].map(([k, l]) => `<button class="chip ${ui.inboxFilter === k ? 'on' : ''}" data-act="inbox-filter" data-id="${k}">${l}<b>${count(k)}</b></button>`).join('')}</div>
         <div class="box"><div class="inbox">
             <div class="inbox-list">${list.length ? list.map(e => `<button class="mail ${e.read ? '' : 'unread'} ${sel && e.id === sel.id ? 'on' : ''}" data-act="open-mail" data-id="${e.id}">
-                <div class="m-top"><span>${pill(e.kind === 'sales' ? 'Sales' : 'Customer', e.kind === 'sales' ? 'p-violet' : 'p-teal')} ${esc(e.to)}</span><span class="nowrap">${esc(fmtStamp(e.at))}</span></div>
+                <div class="m-top"><span>${pill(MAIL_KIND[e.kind][0], MAIL_KIND[e.kind][1])} ${esc(e.to)}</span><span class="nowrap">${esc(fmtStamp(e.at))}</span></div>
                 <div class="m-sub">${esc(e.subject)}</div></button>`).join('') : '<p class="muted" style="padding:16px">No emails yet.</p>'}</div>
-            <div class="inbox-view">${sel ? `<div class="mail-meta"><div><span>Subject</span><b>${esc(sel.subject)}</b></div><div><span>To</span>${esc(sel.to)}</div><div><span>From</span>Engage WorkForce &lt;no-reply@engageworkforce.com.au&gt;</div><div><span>Sent</span>${esc(fmtStamp(sel.at))}</div></div>${sel.body}` : '<p class="muted">Select an email.</p>'}</div>
+            <div class="inbox-view">${sel ? `<div class="mail-meta"><div><span>Subject</span><b>${esc(sel.subject)}</b></div><div><span>To</span>${esc(sel.to)}</div><div><span>From</span>${sel.kind === 'xero' ? `${esc(bset().supplier)} via Xero` : 'Engage WorkForce &lt;no-reply@engageworkforce.com.au&gt;'}</div><div><span>Sent</span>${esc(fmtStamp(sel.at))}</div></div>${sel.body}` : '<p class="muted">Select an email.</p>'}</div>
         </div></div>
     </div>`;
 }
@@ -825,7 +1006,7 @@ function viewCustomers() {
     const filters = [['All', 'All'], ['Trial', 'Trial'], ['TrialEnded', 'Trial ended'], ['Active', 'Active'], ['Suspended', 'Suspended'], ['Cancelled', 'Cancelled'], ['Existing', 'Existing customer']];
     return saChrome('customers') + `<div class="page">
         <div class="page-head">
-            <div><div class="eyebrow">SuperAdmin</div><h1>Customers</h1><p>Every company, its agreement, trial and how many guards it schedules. Billing stays manual.</p></div>
+            <div><div class="eyebrow">SuperAdmin</div><h1>Customers</h1><p>Every company, its agreement, trial and how many guards it schedules. Invoices are raised in Xero from the Billing tab.</p></div>
             <div class="head-tools"><input class="search" type="search" placeholder="Search company or admin" value="${esc(ui.custSearch)}" data-search="cust" aria-label="Search customers"><button class="btn btn-p" data-act="create-blank">+ Create customer</button></div>
         </div>
         <div class="kpis">
@@ -865,7 +1046,7 @@ function custRows() {
         return `<tr class="click" data-act="open-cust" data-id="${c.id}" tabindex="0">
             <td><b>${esc(c.name)}</b><div class="sub">${esc(c.adminEmail)}${c.activated ? '' : ' · <span class="warn-text">not activated</span>'}</div></td>
             <td>${a ? esc(a.plan) : '<span class="muted">—</span>'}</td>
-            <td>${pill(st.label, st.cls)}<div class="sub ${st.warn ? 'warn' : ''}">${esc(st.sub)}</div></td>
+            <td>${pill(st.label, st.cls)}${overdueOf(c).length ? ' ' + pill('Payment overdue', 'p-red') : ''}<div class="sub ${st.warn ? 'warn' : ''}">${esc(st.sub)}</div></td>
             <td>${pricing}</td><td>${guardsCell(c)}</td><td class="nowrap">${dates}</td>
             <td><button class="btn btn-sm" data-act="open-cust" data-id="${c.id}">Open</button></td></tr>`;
     }).join('');
@@ -885,7 +1066,7 @@ function openCustomerDrawer(id) {
     ];
     actions.push(btn('resend', 'Resend activation'), btn('view-as', 'View as customer'));
     const ovs = c.overrides.map(o => `<li><span>${o.granted ? pill('Added', 'p-green') : pill('Removed', 'p-red')} ${esc(BY_KEY[o.key].name)}</span><span class="sub">${o.expiresAt ? (overrideActive(o) ? 'until ' + fmtDate(o.expiresAt) : 'expired ' + fmtDate(o.expiresAt)) : 'no expiry'}</span></li>`).join('');
-    showDrawer(`<div class="drawer-h"><div><div class="sub" style="color:#c7d4ff">Customer</div><h3>${esc(c.name)}</h3><div style="margin-top:6px">${pill(st.label, st.cls)} <span class="sub" style="color:#c7d4ff">${esc(st.sub)}</span></div></div><button class="x" data-act="close-drawer" aria-label="Close">×</button></div>
+    showDrawer(`<div class="drawer-h"><div><div class="sub" style="color:#c7d4ff">Customer</div><h3>${esc(c.name)}</h3><div style="margin-top:6px">${pill(st.label, st.cls)}${overdueOf(c).length ? ' ' + pill('Payment overdue', 'p-red') : ''} <span class="sub" style="color:#c7d4ff">${esc(st.sub)}</span></div></div><button class="x" data-act="close-drawer" aria-label="Close">×</button></div>
         <div class="drawer-b">
             <div class="btn-row" style="margin-bottom:16px">${actions.join('')}</div>
             <div class="sec-title">Admin login</div>
@@ -900,6 +1081,7 @@ function openCustomerDrawer(id) {
                 <dt>Billing notes</dt><dd>${esc(a.billingNotes || '—')}</dd>
                 <dt>Inquiry</dt><dd>${q ? `<a href="#/sa/inquiries?open=${q.id}">${esc(q.companyName)} · ${esc(fmtStamp(q.createdAt))}</a>` : '—'}</dd></dl>`
                 : '<p class="muted">No agreement. Shown as "Existing customer": every feature is on and nothing changes for them.</p>'}
+            ${a ? billingSection(c, btn) : ''}
             <div class="sec-title">Guards scheduled</div>
             <p>${c.guardsThis} this month · ${c.guardsLast} last month${a && a.includedGuards ? ` · licence for ${a.includedGuards}` : ''}${a && a.includedGuards && c.guardsThis > a.includedGuards ? ` ${pill('Over licence: true-up at renewal', 'p-orange')}` : ''}</p>
             <div class="proto-note"><b class="tag">PROTOTYPE</b>Change the usage to see the band flag and price move.
@@ -943,6 +1125,7 @@ function openAgreementModal(mode, opts) {
         guards: c ? (c.guardsLast || c.guardsThis || 20) : guardsFromTeam(q && q.teamSize),
         annualAmount: a && a.annualAmount ? a.annualAmount : '', billingNotes: a ? a.billingNotes : '',
         overrides: c ? clone(c.overrides) : [], reason: '', prevPlan: plan,
+        billName: '', billEmail: '', billAbn: '', billGst: true, prevCountry: 'Australia',
     };
     const title = mode === 'create' ? 'Create customer account' : mode === 'attach' ? `Attach agreement — ${c.name}` : `Edit agreement — ${c.name}`;
     const opt = (list, val, labels) => list.map(v => `<option value="${esc(v)}" ${String(v) === String(val) ? 'selected' : ''}>${esc(labels ? labels[v] : v)}</option>`).join('');
@@ -959,7 +1142,12 @@ function openAgreementModal(mode, opts) {
                         <div class="fld"><label for="am-phone">Phone</label><input class="in" id="am-phone" name="phone" value="${esc(draft.phone)}"></div></div>
                     <div class="grid2"><div class="fld"><label for="am-country">Country</label><select class="in" id="am-country" name="country">${opt(['Australia', 'New Zealand'], draft.country)}</select></div>
                         <div class="fld"><label for="am-tz">Time zone</label><select class="in" id="am-tz" name="timeZone">${opt(TIMEZONES, draft.timeZone)}</select></div></div>
-                    <p class="hint" style="margin-top:-4px">The admin gets an activation link by email. No password is ever typed or shown.</p>` : ''}
+                    <p class="hint" style="margin-top:-4px">The admin gets an activation link by email. No password is ever typed or shown.</p>
+                    <div class="sec-title">Billing details</div>
+                    <div class="grid2"><div class="fld"><label for="am-bname">Billing name</label><input class="in" id="am-bname" name="billName" value="${esc(draft.billName)}" placeholder="Defaults to the company name"></div>
+                        <div class="fld"><label for="am-bemail">Billing email</label><input class="in" id="am-bemail" name="billEmail" type="email" value="${esc(draft.billEmail)}" placeholder="Defaults to the admin email"></div></div>
+                    <div class="grid2"><div class="fld"><label for="am-abn">ABN</label><input class="in" id="am-abn" name="billAbn" value="${esc(draft.billAbn)}" placeholder="Needed on invoices of $1,000 or more"></div>
+                        <div class="fld"><span class="lbl">GST</span><label class="check"><input type="checkbox" name="billGst" ${draft.billGst ? 'checked' : ''}>Charge GST (${bset().gstRate}%)</label><span class="hint">On for Australia, off for New Zealand. Ask your accountant.</span></div></div>` : ''}
                 <div class="sec-title">Plan & ${mode === 'create' ? 'start' : 'status'}</div>
                 <div class="grid2">
                     <div class="fld"><label for="am-plan">Plan</label><select class="in" id="am-plan" name="plan">${opt(PLANS, draft.plan)}</select></div>
@@ -1013,7 +1201,13 @@ function syncAgreementModal(first) {
     if (!first) {
         const fd = new FormData(form);
         ['companyName', 'firstName', 'lastName', 'email', 'phone', 'country', 'timeZone', 'plan', 'start', 'status', 'trialDays', 'model', 'rate', 'minMonthly', 'includedGuards', 'guards', 'annualAmount', 'billingNotes', 'reason']
-            .forEach(k => { if (fd.has(k)) draft[k] = String(fd.get(k)); });
+            .concat(['billName', 'billEmail', 'billAbn']).forEach(k => { if (fd.has(k)) draft[k] = String(fd.get(k)); });
+        if (form.billGst) {                                                  // checkbox: absent from FormData when off
+            draft.billGst = form.billGst.checked;
+            if (form.country && form.country.value !== draft.prevCountry) {   // country changed: re-default the GST tick
+                draft.prevCountry = form.country.value; draft.billGst = form.country.value === 'Australia'; form.billGst.checked = draft.billGst;
+            }
+        }
     }
     if (draft.plan !== draft.prevPlan) {                                      // plan changed: re-base the defaults
         const oldList = LIST_RATE[draft.prevPlan];
@@ -1106,6 +1300,7 @@ function submitAgreement() {
         if (!d.firstName.trim() || !d.lastName.trim()) errs.push("Enter the admin's first and last name.");
         if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(d.email.trim())) errs.push('Enter a valid admin email.');
         else if (state.companies.some(c => c.adminEmail.toLowerCase() === d.email.trim().toLowerCase())) errs.push('That email is already an admin login for another company.');
+        if (d.billEmail.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(d.billEmail.trim())) errs.push('Enter a valid billing email, or leave it blank to use the admin email.');
     }
     if (d.model !== 'Custom' && !(num(d.rate) > 0)) errs.push('Enter the agreed rate per guard.');
     if (d.model === 'AnnualLicence' && !(num(d.includedGuards) > 0)) errs.push('Enter how many guards the licence covers.');
@@ -1132,6 +1327,7 @@ function submitAgreement() {
             renewalDate: !trial && prepaid ? addDays(state.today, 365) : null, inquiryId: d.inquiryId,
         }));
         c.overrides = ovs;
+        c.billing = { legalName: d.billName.trim() || c.name, email: d.billEmail.trim() || c.adminEmail, abn: d.billAbn.trim(), address: '', chargeGst: d.billGst, ref: '', xeroContactId: null };
         const q = d.inquiryId && inq(d.inquiryId);
         const detail = [`${trial ? `Trial ${c.agreement.trialDays} days` : 'Paid subscription'} · ${d.plan} · ${priceLine(c)}`, ...overrideDetail(ovs, d.plan)].join('; ');
         hist(c, 'Created', detail, d.reason.trim() || (q ? `Created from inquiry (${q.companyName})` : 'Created by SuperAdmin'));
@@ -1139,7 +1335,13 @@ function submitAgreement() {
         if (q) { q.status = trial ? 'TrialActive' : 'Won'; q.convertedCompanyId = c.id; }
         emailActivation(c);
         if (trial) emailTrialReady(c); else emailAccountReady(c);
-        toast(`${c.name} created. Activation and "${trial ? 'trial ready' : 'account ready'}" emails sent.`);
+        let invMsg = '';
+        if (!trial && prepaid) {          // paid and prepaid from day one: the first invoice is a Draft in Xero straight away
+            const inv = newInvoice(c, 'Initial', 'initial', `12 months from ${fmtDate(state.today)}`, prepaidLines(c, state.today));
+            const r = createInXero(inv);
+            invMsg = r.ok ? ` Draft invoice ${inv.xero.number} created in Xero.` : ` Invoice is waiting, not in Xero yet: ${r.why}`;
+        } else if (!trial) invMsg = ` The first invoice is created on ${fmtDate(nextBillingDay())}, after the month ends.`;
+        toast(`${c.name} created. Activation and "${trial ? 'trial ready' : 'account ready'}" emails sent.${invMsg}`);
     } else {
         c = comp(d.companyId);
         const old = c.agreement ? clone(c.agreement) : null, oldOv = clone(c.overrides);
@@ -1222,16 +1424,28 @@ function actExtend(id) {
     });
 }
 function actConvert(id) {
-    const c = comp(id), a = c.agreement;
-    quickModal(`Convert to paid — ${c.name}`, `<p>${esc(a.plan)} · ${esc(priceLine(c))}. Starts today, ${fmtDate(state.today)}. To change the price, or switch to an annual licence, use <b>Edit agreement</b> first.</p>${reasonField('e.g. Agreed on the call, invoice from 1 Nov')}`, 'Convert to paid', 'btn-p', fd => {
+    const c = comp(id), a = c.agreement, prepaid = a.model !== 'PerGuard', b = billOf(c);
+    let invBlock;
+    if (prepaid) {
+        const t = calcInvoice(prepaidLines(c, state.today), b.chargeGst, bset().gstRate);
+        invBlock = `<div class="fld"><span class="lbl">First invoice: ${money(t.subtotal, true)}${b.chargeGst ? ` + GST ${money(t.gst, true)} = ${money(t.total, true)}` : ' (no GST)'}</span>
+            <div class="radios"><label><input type="radio" name="inv" value="xero" checked>Create the draft in Xero now</label><label><input type="radio" name="inv" value="queue">Add to the billing queue only</label><label><input type="radio" name="inv" value="none">Don't invoice yet</label></div>
+            <span class="hint">You approve and send it in Xero. Payment terms ${bset().terms} days.</span></div>`;
+    } else invBlock = `<div class="info">Per-guard customers are billed after the month ends. Their first invoice is created on <b>${fmtDate(nextBillingDay())}</b> for the guards scheduled until then.</div>`;
+    quickModal(`Convert to paid — ${c.name}`, `<p>${esc(a.plan)} · ${esc(priceLine(c))}. Starts today, ${fmtDate(state.today)}. To change the price, or switch to an annual licence, use <b>Edit agreement</b> first.</p>${invBlock}${reasonField('e.g. Agreed on the call, invoice from 1 Nov')}`, 'Convert to paid', 'btn-p', fd => {
         const reason = requireReason(fd); if (!reason) return false;
-        const old = AG_STATUS[a.status];
+        const old = AG_STATUS[a.status], choice = prepaid ? String(fd.get('inv') || 'xero') : 'none';
         a.status = 'Active'; a.subscribedAt = state.today;
-        const prepaid = a.model !== 'PerGuard';
         a.renewalDate = prepaid ? addDays(state.today, 365) : null;
         hist(c, 'Converted to paid', `Status ${old} → Active · ${priceLine(c)}`, reason);
         const q = a.inquiryId && inq(a.inquiryId); if (q) q.status = 'Won';
-        toast(`${c.name} is now a paying customer.`);
+        let msg = '';
+        if (choice !== 'none') {
+            const inv = invFor(c, 'Initial', 'initial') || newInvoice(c, 'Initial', 'initial', `12 months from ${fmtDate(state.today)}`, prepaidLines(c, state.today));
+            if (choice === 'xero') { const r = createInXero(inv); msg = r.ok ? ` Draft invoice ${inv.xero.number} created in Xero.` : ` Invoice is waiting, not in Xero yet: ${r.why}`; }
+            else msg = ' Invoice added to the billing queue.';
+        }
+        toast(`${c.name} is now a paying customer.${msg}`);
     });
 }
 function actStatus(id, status) {
@@ -1252,6 +1466,199 @@ function actResend(id) {
         emailActivation(c, true); hist(c, 'Activation email resent', `To ${c.adminEmail}`, '');
         toast(`Activation email resent to ${c.adminEmail}.`);
     });
+}
+
+/* ================= views: SuperAdmin › Billing ================= */
+const BILL_FILTERS = [['All', 'All'], ['Action', 'To action'], ['Queued', 'Not in Xero'], ['Draft', 'Draft in Xero'], ['Awaiting', 'Awaiting payment'], ['Overdue', 'Overdue'], ['Paid', 'Paid'], ['Void', 'Voided']];
+const matchInv = (i, k) => k === 'All' || (k === 'Action' ? ['Queued', 'Draft'].includes(i.status) : invState(i) === k);
+function viewBilling() {
+    const list = state.invoices, sum = arr => arr.reduce((t, i) => t + invTotals(i).total, 0), by = k => list.filter(i => invState(i) === k);
+    const month = state.today.slice(0, 7);
+    const paidMonth = by('Paid').filter(i => i.xero && i.xero.paidAt && i.xero.paidAt.slice(0, 7) === month);
+    const action = list.filter(i => ['Queued', 'Draft'].includes(i.status)), od = by('Overdue'), aw = by('Awaiting');
+    return saChrome('billing') + `<div class="page">
+        <div class="page-head">
+            <div><div class="eyebrow">SuperAdmin</div><h1>Billing</h1><p>The app works out the amount and creates a Draft in Xero. You approve and send it there; the app reads the status back every night. Nothing here ever locks a customer.</p></div>
+            <div class="head-tools">${bset().xeroOk ? pill('Xero connected', 'p-green') : pill('Xero disconnected', 'p-red')}<span class="sub" style="margin:0">${esc(bset().xeroOrg)}</span></div>
+        </div>
+        ${bset().xeroOk ? '' : '<div class="warn-box"><b>Xero needs reconnecting.</b> New invoices wait as "Not in Xero" with a reason and are retried every night. Nothing is lost. (Prototype: untick it in Settings.)</div>'}
+        <div class="kpis">
+            <button class="kpi teal" data-act="bill-filter" data-id="Action"><div class="n">${action.length}</div><div class="l">To review or send in Xero</div></button>
+            <button class="kpi" data-act="bill-filter" data-id="Awaiting"><div class="n">${money(sum(aw), true)}</div><div class="l">Awaiting payment · ${plural(aw.length, 'invoice')}</div></button>
+            <button class="kpi orange" data-act="bill-filter" data-id="Overdue"><div class="n">${money(sum(od), true)}</div><div class="l">Overdue · ${plural(od.length, 'invoice')}</div></button>
+            <div class="kpi green" style="cursor:default"><div class="n">${money(sum(paidMonth), true)}</div><div class="l">Paid this month · ${plural(paidMonth.length, 'invoice')}</div></div>
+        </div>
+        <div class="chips">${BILL_FILTERS.map(([k, l]) => `<button class="chip ${ui.billFilter === k ? 'on' : ''}" data-act="bill-filter" data-id="${k}">${l}<b>${list.filter(i => matchInv(i, k)).length}</b></button>`).join('')}</div>
+        <div class="box"><div class="tbl-wrap"><table class="tbl">
+            <thead><tr><th>Customer</th><th>Invoice</th><th>Issued</th><th>Due</th><th>Total</th><th>Status</th><th></th></tr></thead>
+            <tbody>${billRows()}</tbody>
+        </table></div></div>
+    </div>`;
+}
+function billRows() {
+    const rows = state.invoices.filter(i => matchInv(i, ui.billFilter))
+        .sort((a, b) => (a.issueDate < b.issueDate ? 1 : a.issueDate > b.issueDate ? -1 : b.id.localeCompare(a.id, undefined, { numeric: true })));
+    if (!rows.length) return '<tr><td colspan="7" class="empty">No invoices here. They are made when you convert a prepaid customer, on the billing day for per-guard customers, and ahead of each renewal.</td></tr>';
+    return rows.map(i => {
+        const c = comp(i.companyId), t = invTotals(i), k = invState(i), [l, cls] = INV_ST[k];
+        return `<tr class="click" data-act="open-inv" data-id="${i.id}" tabindex="0">
+            <td><b>${esc(c.name)}</b></td>
+            <td>${esc(invLabel(i))}<div class="sub">${i.xero ? esc(i.xero.number) + ' in Xero' : 'Not created in Xero yet'}${i.blocked ? ` · <span class="warn-text">${esc(i.blocked)}</span>` : ''}</div></td>
+            <td class="nowrap">${fmtDate(i.issueDate)}</td>
+            <td class="nowrap">${fmtDate(i.dueDate)}${k === 'Overdue' ? `<div class="sub warn">${plural(diffDays(state.today, i.dueDate), 'day')} overdue</div>` : ''}</td>
+            <td class="nowrap"><b class="mono">${money(t.total, true)}</b><div class="sub">${i.chargeGst ? 'incl. GST ' + money(t.gst, true) : 'no GST'}</div></td>
+            <td>${pill(l, cls)}</td><td><button class="btn btn-sm" data-act="open-inv" data-id="${i.id}">Open</button></td></tr>`;
+    }).join('');
+}
+function openInvoiceDrawer(id) {
+    const i = invById(id); if (!i) return;
+    const c = comp(i.companyId), b = billOf(c), t = invTotals(i), k = invState(i), [l, cls] = INV_ST[k], x = i.xero;
+    const btn = (act, label, cl) => `<button class="btn btn-sm ${cl || ''}" data-act="${act}" data-id="${i.id}">${label}</button>`;
+    const stale = i.status === 'Queued' && i.kind !== 'Manual' && c.agreement && i.sig !== agSig(c.agreement);
+    const behind = x && XSTATUS[x.status] !== i.status;
+    const actions = [
+        i.status === 'Queued' ? btn('inv-create', 'Create draft in Xero', 'btn-p') : '',
+        i.status === 'Queued' ? btn('inv-edit', 'Edit lines') : '',
+        stale ? btn('inv-refresh', 'Refresh from agreement', 'btn-warn') : '',
+        i.status === 'Queued' ? btn('inv-cancel', 'Cancel', 'btn-danger') : '',
+        x ? btn('inv-open-xero', 'Open in Xero') : '',
+        x && !['Paid', 'Void'].includes(i.status) ? btn('inv-sync', 'Sync from Xero', behind ? 'btn-p' : '') : '',
+    ].filter(Boolean);
+    showDrawer(`<div class="drawer-h"><div><div class="sub" style="color:#c7d4ff">${esc(INV_KIND[i.kind])} · ${esc(i.periodLabel)}</div><h3>${esc(c.name)}</h3><div style="margin-top:6px">${pill(l, cls)} <span class="sub" style="color:#c7d4ff">${x ? esc(x.number) + ' in Xero' : 'Not in Xero yet'}</span></div></div><button class="x" data-act="close-drawer" aria-label="Close">×</button></div>
+        <div class="drawer-b">
+            ${i.blocked ? `<div class="warn-box"><b>Waiting: ${esc(i.blocked)}</b><br>${i.blocked.startsWith('Missing') ? `Add it in <a href="#/sa/customers?open=${c.id}">the customer's billing details</a>, then press Create draft in Xero. It is also retried each night.` : 'Reconnect Xero (Settings). It is retried each night, so nothing is lost.'}</div>` : ''}
+            ${stale ? '<div class="info">The agreement price changed after this was created. Refresh to rebuild the lines from the current agreement.</div>' : ''}
+            ${behind ? `<div class="info">Xero now shows this as <b>${esc(XERO_TEXT[x.status])}</b>. Press <b>Sync from Xero</b> (it also runs every night).</div>` : ''}
+            <div class="btn-row" style="margin-bottom:16px">${actions.join('')}</div>
+            <div class="sec-title">Invoice</div>
+            <div class="tbl-wrap"><table class="tbl inv-lines"><thead><tr><th>Description</th><th class="num">Qty</th><th class="num">Price</th><th class="num">Amount</th></tr></thead><tbody>
+                ${i.lines.map(ln => `<tr><td>${esc(ln.desc)}</td><td class="num mono">${esc(ln.qty)}</td><td class="num mono">${money(ln.unit, true)}</td><td class="num mono">${money(round2(num(ln.qty) * num(ln.unit)), true)}</td></tr>`).join('')}
+            </tbody></table></div>
+            <div class="inv-tot"><div><span>Subtotal</span><span class="mono">${money(t.subtotal, true)}</span></div>
+                <div><span>${i.chargeGst ? `GST ${esc(i.gstRate)}%` : 'GST'}</span><span class="mono">${i.chargeGst ? money(t.gst, true) : 'not charged'}</span></div>
+                <div class="grand"><span>Total (AUD)</span><span class="mono">${money(t.total, true)}</span></div></div>
+            <dl class="dl"><dt>Bill to</dt><dd>${esc(b.legalName)}</dd><dt>Billing email</dt><dd>${esc(b.email)}</dd><dt>ABN</dt><dd>${b.abn ? esc(b.abn) : '—'}</dd>
+                <dt>Issued</dt><dd>${fmtDate(i.issueDate)}</dd><dt>Due</dt><dd>${fmtDate(i.dueDate)} · ${bset().terms} day terms${k === 'Overdue' ? ` · <span class="warn-text">${plural(diffDays(state.today, i.dueDate), 'day')} overdue</span>` : ''}</dd></dl>
+            <div class="sec-title">In Xero</div>
+            ${x ? `<dl class="dl"><dt>Xero number</dt><dd>${esc(x.number)}</dd><dt>Status in Xero</dt><dd>${esc(XERO_TEXT[x.status])}</dd>
+                <dt>Our app last saw</dt><dd>${esc(INV_ST[i.status][0])} · ${esc(fmtStamp(i.syncedAt))}</dd>${x.sentAt ? `<dt>Sent from Xero</dt><dd>${fmtDate(x.sentAt)}</dd>` : ''}${x.paidAt ? `<dt>Paid</dt><dd>${fmtDate(x.paidAt)}</dd>` : ''}</dl>`
+                : '<p class="muted">Not created in Xero yet. <b>Create draft in Xero</b> pushes it as a Draft; you approve and send it there.</p>'}
+            ${x && ['DRAFT', 'AUTHORISED'].includes(x.status) ? `<div class="proto-note"><b class="tag">PROTOTYPE</b>Act as Xero. In the real product these happen inside Xero, not here.
+                <div class="btn-row" style="margin-top:8px">${x.status === 'DRAFT' ? btn('xero-approve', 'Approve and email to client') : btn('xero-pay', 'Record payment')}${btn('xero-void', 'Void in Xero', 'btn-danger')}</div></div>` : ''}
+        </div>`);
+}
+function billingSection(c, btn) {   // the "Billing" block inside the customer drawer
+    const b = billOf(c), invs = state.invoices.filter(i => i.companyId === c.id).sort((x, y) => (x.issueDate < y.issueDate ? 1 : -1));
+    return `<div class="sec-title">Billing</div>
+        <dl class="dl"><dt>Bill to</dt><dd>${esc(b.legalName)}</dd><dt>Billing email</dt><dd>${esc(b.email)}</dd>
+            <dt>ABN</dt><dd>${b.abn ? esc(b.abn) : '<span class="warn-text">Not recorded</span>'}</dd>
+            <dt>GST</dt><dd>${b.chargeGst ? `Charged at ${esc(bset().gstRate)}%` : 'Not charged'}</dd>
+            <dt>Xero contact</dt><dd>${b.xeroContactId ? esc(b.xeroContactId) + ' (linked)' : 'Created with the first invoice'}</dd></dl>
+        <div class="btn-row" style="margin-bottom:10px">${btn('bill-edit', 'Edit billing details')}${btn('inv-add', 'Add invoice')}</div>
+        ${invs.length ? `<ul class="mini-list" style="margin-bottom:16px">${invs.map(i => { const [l, cls] = INV_ST[invState(i)]; return `<li><span><a href="#/sa/billing?open=${i.id}">${esc(invLabel(i))}</a></span><span>${money(invTotals(i).total, true)} ${pill(l, cls)}</span></li>`; }).join('')}</ul>` : '<p class="muted" style="margin-bottom:16px">No invoices yet.</p>'}`;
+}
+
+/* ---- billing modals ---- */
+function actBilling(id) {
+    const c = comp(id), b = billOf(c);
+    quickModal(`Billing details — ${c.name}`, `<p class="hint" style="margin-top:0">These go on the Xero contact and the invoice. Invoices not yet in Xero pick up a changed GST setting.</p>
+        <div class="fld"><label for="bd-name">Billing name <span class="req">*</span></label><input class="in" id="bd-name" name="legalName" value="${esc(b.legalName)}"></div>
+        <div class="grid2"><div class="fld"><label for="bd-email">Billing email <span class="req">*</span></label><input class="in" id="bd-email" name="email" type="email" value="${esc(b.email)}"></div>
+            <div class="fld"><label for="bd-abn">ABN</label><input class="in" id="bd-abn" name="abn" value="${esc(b.abn)}" placeholder="Needed on invoices of $1,000 or more"></div></div>
+        <div class="fld"><label for="bd-addr">Address</label><textarea class="in" id="bd-addr" name="address">${esc(b.address)}</textarea></div>
+        <div class="grid2"><div class="fld"><label for="bd-ref">PO / reference</label><input class="in" id="bd-ref" name="ref" value="${esc(b.ref)}"></div>
+            <div class="fld"><span class="lbl">GST</span><label class="check"><input type="checkbox" name="chargeGst" ${b.chargeGst ? 'checked' : ''}>Charge GST (${esc(bset().gstRate)}%)</label></div></div>`, 'Save', 'btn-p', fd => {
+        const legalName = String(fd.get('legalName') || '').trim(), email = String(fd.get('email') || '').trim();
+        if (!legalName) { $('#qm-errors').innerHTML = '<div class="errors">Enter the billing name.</div>'; return false; }
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { $('#qm-errors').innerHTML = '<div class="errors">Enter a valid billing email.</div>'; return false; }
+        Object.assign(b, { legalName, email, abn: String(fd.get('abn') || '').trim(), address: String(fd.get('address') || '').trim(), ref: String(fd.get('ref') || '').trim(), chargeGst: fd.has('chargeGst') });
+        state.invoices.filter(i => i.companyId === c.id && i.status === 'Queued').forEach(i => { i.chargeGst = b.chargeGst; i.blocked = ''; });
+        hist(c, 'Billing details updated', `${legalName} · ${email}${b.abn ? ' · ABN ' + b.abn : ''} · GST ${b.chargeGst ? 'charged' : 'not charged'}`, '');
+        toast('Billing details saved.');
+    });
+}
+let lineDraft = null;
+function openLinesModal(invId, companyId) {
+    const inv = invId && invById(invId), c = comp(inv ? inv.companyId : companyId);
+    lineDraft = { invId: inv ? inv.id : null, companyId: c.id, lines: inv ? clone(inv.lines) : [{ desc: '', qty: 1, unit: 0 }],
+        issueDate: inv ? inv.issueDate : state.today, dueDate: inv ? inv.dueDate : addDays(state.today, bset().terms), label: inv ? inv.periodLabel : 'One-off',
+        chargeGst: inv ? inv.chargeGst : billOf(c).chargeGst, gstRate: inv ? inv.gstRate : bset().gstRate };
+    showModal(`<div class="modal-h"><h3>${inv ? 'Edit invoice lines' : 'Add invoice'} — ${esc(c.name)}</h3><button class="x" data-act="close-modal" aria-label="Close">×</button></div>
+        <form id="lines-form" data-form="lines" novalidate><div class="modal-b"><div id="ln-errors"></div>
+            <div class="grid2"><div class="fld"><label for="ln-issue">Issue date</label><input class="in" id="ln-issue" name="issueDate" type="date" value="${esc(lineDraft.issueDate)}"></div>
+                <div class="fld"><label for="ln-due">Due date</label><input class="in" id="ln-due" name="dueDate" type="date" value="${esc(lineDraft.dueDate)}"></div></div>
+            ${inv && inv.kind !== 'Manual' ? '' : `<div class="fld"><label for="ln-label">What is it for?</label><input class="in" id="ln-label" name="label" value="${esc(lineDraft.label)}" placeholder="e.g. Extra guards true-up, October"></div>`}
+            <div class="sec-title">Lines (AUD, excluding GST)</div>
+            <div id="ln-body"></div>
+            <button type="button" class="btn btn-sm" data-act="line-add">+ Add line</button>
+            <p class="hint">Use a negative price for a discount. GST is worked out on the total.</p>
+            <div id="ln-totals"></div></div>
+        <div class="modal-f"><button type="button" class="btn" data-act="close-modal">Cancel</button><button type="submit" class="btn btn-p">Save</button></div></form>`, 'lg');
+    renderLines();
+}
+function renderLines() {
+    const d = lineDraft;
+    $('#ln-body').innerHTML = `<div class="ln-row head"><span>Description</span><span>Qty</span><span>Price</span><span class="amt">Amount</span><span></span></div>` +
+        d.lines.map((l, n) => `<div class="ln-row"><input class="in desc" name="desc-${n}" value="${esc(l.desc)}" aria-label="Description, line ${n + 1}" placeholder="Description">
+            <input class="in" name="qty-${n}" type="number" step="any" value="${esc(l.qty)}" aria-label="Quantity, line ${n + 1}"><input class="in" name="unit-${n}" type="number" step="any" value="${esc(l.unit)}" aria-label="Price, line ${n + 1}">
+            <span class="amt mono" id="ln-amt-${n}">${money(round2(num(l.qty) * num(l.unit)), true)}</span><button type="button" class="btn btn-sm" data-act="line-del" data-id="${n}" aria-label="Remove line ${n + 1}">×</button></div>`).join('');
+    renderLineTotals();
+}
+function renderLineTotals() {
+    const d = lineDraft, t = calcInvoice(d.lines, d.chargeGst, d.gstRate);
+    d.lines.forEach((l, n) => { const el = $('#ln-amt-' + n); if (el) el.textContent = money(round2(num(l.qty) * num(l.unit)), true); });
+    $('#ln-totals').innerHTML = `<div class="inv-tot"><div><span>Subtotal</span><span class="mono">${money(t.subtotal, true)}</span></div><div><span>${d.chargeGst ? `GST ${esc(d.gstRate)}%` : 'GST'}</span><span class="mono">${d.chargeGst ? money(t.gst, true) : 'not charged'}</span></div><div class="grand"><span>Total (AUD)</span><span class="mono">${money(t.total, true)}</span></div></div>`;
+}
+function syncLines() {   // copy the inputs into lineDraft without re-rendering (so typing keeps its focus)
+    const f = $('#lines-form'); if (!f || !lineDraft) return;
+    lineDraft.lines.forEach((l, n) => { l.desc = f.elements['desc-' + n].value; l.qty = f.elements['qty-' + n].value; l.unit = f.elements['unit-' + n].value; });
+    lineDraft.issueDate = f.issueDate.value; lineDraft.dueDate = f.dueDate.value;
+    if (f.label) lineDraft.label = f.label.value;
+}
+function saveLines() {
+    syncLines();
+    const d = lineDraft, errs = [];
+    if (!d.lines.length || d.lines.some(l => !l.desc.trim())) errs.push('Every line needs a description.');
+    if (d.lines.some(l => !(num(l.qty) !== 0))) errs.push('A quantity cannot be zero.');
+    if (!d.issueDate || !d.dueDate) errs.push('Enter an issue date and a due date.');
+    else if (d.dueDate < d.issueDate) errs.push('The due date cannot be before the issue date.');
+    if (!d.lines.every(l => Number.isFinite(parseFloat(l.qty)) && Number.isFinite(parseFloat(l.unit)))) errs.push('Enter a quantity and a price on every line.');
+    if (!errs.length && calcInvoice(d.lines, d.chargeGst, d.gstRate).total <= 0) errs.push('The total must be more than $0. To undo an invoice, cancel it instead.');
+    if (errs.length) { $('#ln-errors').innerHTML = `<div class="errors"><ul>${errs.map(e => `<li>${esc(e)}</li>`).join('')}</ul></div>`; return; }
+    const lines = d.lines.map(l => ({ desc: l.desc.trim(), qty: num(l.qty), unit: num(l.unit) })), c = comp(d.companyId);    let inv = d.invId && invById(d.invId);
+    if (inv) {
+        inv.lines = lines; inv.issueDate = d.issueDate; inv.dueDate = d.dueDate; if (inv.kind === 'Manual') inv.periodLabel = d.label.trim() || 'One-off';
+        hist(c, 'Invoice edited', `${invLabel(inv)} · lines changed · ${money(invTotals(inv).total, true)}`, '');
+        toast('Invoice lines saved.'); save(); closeModal(); render();
+    } else {
+        inv = newInvoice(c, 'Manual', 'manual-' + (state.nextId + 1), d.label.trim() || 'One-off', lines, d.issueDate); inv.dueDate = d.dueDate;
+        hist(c, 'Invoice added', `${invLabel(inv)} · ${money(invTotals(inv).total, true)} · waiting to be created in Xero`, '');
+        toast('Invoice added to the billing queue.'); save(); closeModal(); location.hash = '#/sa/billing?open=' + inv.id;
+    }
+}
+function actCancelInv(id) {
+    const i = invById(id), c = comp(i.companyId);
+    quickModal(`Cancel invoice — ${c.name}`, `<div class="info">${esc(invLabel(i))} was never created in Xero, so nothing is voided there. It is just removed from the queue. An invoice already in Xero is voided in Xero.</div>${reasonField('e.g. Customer paid annually instead')}`, 'Cancel invoice', 'btn-danger', fd => {
+        const reason = requireReason(fd); if (!reason) return false;
+        i.status = 'Void'; i.blocked = '';
+        hist(c, 'Invoice cancelled', `${invLabel(i)} · ${money(invTotals(i).total, true)} · never created in Xero`, reason);
+        toast('Invoice cancelled.');
+    });
+}
+function refreshInvoice(id) {
+    const i = invById(id), c = comp(i.companyId), b = billOf(c);
+    const from = i.periodKey === 'initial' ? i.issueDate : i.periodKey.replace('renewal-', '');
+    i.lines = i.kind === 'Monthly' ? usageLines(c, i.periodLabel) : prepaidLines(c, from);
+    i.sig = agSig(c.agreement); i.chargeGst = b.chargeGst; i.blocked = '';
+    hist(c, 'Invoice refreshed', `${invLabel(i)} rebuilt from the current agreement · ${money(invTotals(i).total, true)}`, '');
+    save(); render(); toast('Rebuilt from the current agreement.');
+}
+function xeroAct(id, what) {   // prototype-only: stands in for someone working inside Xero
+    const i = invById(id), x = i.xero, c = comp(i.companyId);
+    if (what === 'approve' && x.status === 'DRAFT') { x.status = 'AUTHORISED'; x.sentAt = state.today; emailXeroInvoice(i); toast(`Approved in Xero and emailed to ${billOf(c).email}. Our app sees it at the next sync.`); }
+    else if (what === 'pay' && x.status === 'AUTHORISED') { x.status = 'PAID'; x.paidAt = state.today; toast('Payment recorded in Xero. Our app sees it at the next sync.'); }
+    else if (what === 'void' && ['DRAFT', 'AUTHORISED'].includes(x.status)) { x.status = 'VOIDED'; toast('Voided in Xero. Our app sees it at the next sync.'); }
+    save(); render();
 }
 
 /* ================= views: customer app ================= */
@@ -1349,6 +1756,21 @@ function openSettings() {
                     <label class="check"><input type="checkbox" name="notifyCustomers" ${s.notifyCustomers ? 'checked' : ''}>Email customers at T-3 / T-1 and on expiry (decision 3)</label>
                     <label class="check"><input type="checkbox" name="enforce" ${s.enforce ? 'checked' : ''}>Enforce feature pages (config switch, ships off)</label></div>
             </div>
+            <div class="sec-title">Billing & Xero</div>
+            <div class="grid2">
+                <div class="fld"><label for="st-supplier">Supplier name on invoices</label><input class="in" id="st-supplier" name="supplier" value="${esc(s.billing.supplier)}"></div>
+                <div class="fld"><label for="st-acct">Xero sales account code</label><input class="in" id="st-acct" name="accountCode" value="${esc(s.billing.accountCode)}"><span class="hint">Used on every invoice line (200 is Xero's default sales account).</span></div>
+            </div>
+            <div class="grid2">
+                <div class="fld"><label for="st-terms">Payment terms (days)</label><input class="in" id="st-terms" name="terms" type="number" min="1" max="90" value="${esc(s.billing.terms)}"></div>
+                <div class="fld"><label for="st-gst">GST rate (%)</label><input class="in" id="st-gst" name="gstRate" type="number" min="0" max="30" step="0.5" value="${esc(s.billing.gstRate)}"></div>
+            </div>
+            <div class="grid2">
+                <div class="fld"><label for="st-bday">Per-guard billing day of the month (1 to 28)</label><input class="in" id="st-bday" name="billingDay" type="number" min="1" max="28" value="${esc(s.billing.billingDay)}"></div>
+                <div class="fld"><label for="st-lead">Renewal draft this many days before the renewal date</label><input class="in" id="st-lead" name="renewalLeadDays" type="number" min="1" max="400" value="${esc(s.billing.renewalLeadDays)}"></div>
+            </div>
+            <div class="fld"><span class="lbl">Xero connection: ${esc(s.billing.xeroOrg)}</span>
+                <label class="check"><input type="checkbox" name="xeroLapsed" ${s.billing.xeroOk ? '' : 'checked'}>Simulate: the Xero connection has lapsed (new invoices wait as "Not in Xero" and are retried each night)</label></div>
             <div class="sec-title">Feature matrix (decision 9)</div>
             <div class="tbl-wrap" style="max-height:340px;overflow-y:auto"><table class="tbl"><thead><tr><th>Feature</th><th>Group</th><th>Included from</th></tr></thead><tbody>
                 ${gated.map(f => `<tr><td>${esc(f.name)}${minPlanOf(f) !== f.min ? ' ' + pill('changed', 'p-violet') : ''}</td><td class="muted">${esc(f.cat)}</td><td><select class="in" name="m-${f.key}" aria-label="${esc(f.name)} included from">${TIERS.map(t => `<option ${t === minPlanOf(f) ? 'selected' : ''}>${t}</option>`).join('')}</select></td></tr>`).join('')}
@@ -1364,6 +1786,14 @@ function saveSettings(form) {
     s.annualMonths = Math.min(12, Math.max(1, Math.round(num(fd.get('annualMonths')) || 10)));
     s.notifyCustomers = fd.has('notifyCustomers');
     s.enforce = fd.has('enforce');
+    const clampInt = (v, lo, hi, dflt) => Math.min(hi, Math.max(lo, Math.round(num(v)) || dflt)), b = s.billing;
+    b.supplier = String(fd.get('supplier') || '').trim() || b.supplier;
+    b.accountCode = String(fd.get('accountCode') || '').trim() || '200';
+    b.terms = clampInt(fd.get('terms'), 1, 90, 14);
+    if (String(fd.get('gstRate')).trim() !== '') b.gstRate = Math.min(30, Math.max(0, num(fd.get('gstRate'))));
+    b.billingDay = clampInt(fd.get('billingDay'), 1, 28, 1);
+    b.renewalLeadDays = clampInt(fd.get('renewalLeadDays'), 1, 400, 30);
+    b.xeroOk = !fd.has('xeroLapsed');
     s.matrix = {};
     SELLABLE.filter(f => f.min !== 'Always').forEach(f => { const v = String(fd.get('m-' + f.key)); if (v && v !== f.min) s.matrix[f.key] = v; });
     save(); closeModal(); render(); toast('Settings saved.');
@@ -1377,7 +1807,7 @@ function showModal(html, size) {
     const first = $('#modal-root input:not([type=hidden]):not([disabled]), #modal-root select, #modal-root textarea, #modal-root button');
     if (first) first.focus();
 }
-function closeModal() { $('#modal-root').innerHTML = ''; draft = null; quickSubmit = null; if (lastFocus && lastFocus.focus) lastFocus.focus(); }
+function closeModal() { $('#modal-root').innerHTML = ''; draft = null; quickSubmit = null; lineDraft = null; if (lastFocus && lastFocus.focus) lastFocus.focus(); }
 function showDrawer(html) {
     $('#drawer-root').innerHTML = `<div class="drawer-scrim" data-act="close-drawer"></div><aside class="drawer" role="dialog" aria-modal="true">${html}</aside>`;
     const x = $('#drawer-root .x'); if (x) x.focus();
@@ -1409,12 +1839,14 @@ function render() {
     else if (path === '/inbox' || path.startsWith('/inbox/')) html = viewInbox(path.split('/')[2]);
     else if (path === '/sa/inquiries') html = viewInquiries(query);
     else if (path === '/sa/customers') html = viewCustomers(query);
+    else if (path === '/sa/billing') html = viewBilling();
     else if (path.startsWith('/app')) html = viewApp(path.replace(/^\/app\/?/, '') || 'insighthub');
     else html = viewOverview();
     $('#view').innerHTML = html;
     $('#drawer-root').innerHTML = '';
     if (query.open && path === '/sa/inquiries') openInquiryDrawer(query.open);
     if (query.open && path === '/sa/customers') openCustomerDrawer(query.open);
+    if (query.open && path === '/sa/billing') openInvoiceDrawer(query.open);
 }
 let lastSection = null;
 window.addEventListener('hashchange', () => {
@@ -1439,6 +1871,32 @@ const ACTIONS = {
     'open-mail': (el, id) => { location.hash = '#/inbox/' + id; },
     'goto-inq': (el, id) => { location.hash = '#/sa/inquiries' + (id ? '?open=' + id : ''); },
     'goto-cust': (el, id) => { location.hash = '#/sa/customers' + (id ? '?open=' + id : ''); },
+    'goto-bill': () => { location.hash = '#/sa/billing'; },
+    'open-xero': () => toast('Prototype: this opens the invoice in Xero (go.xero.com), where the client would also see a Pay now button if online payments are on.'),
+    'bill-filter': (el, id) => { ui.billFilter = ui.billFilter === id ? 'All' : id; render(); },
+    'open-inv': (el, id, e) => {
+        e.stopPropagation();
+        if (parseHash().path === '/sa/billing') { history.replaceState(null, '', '#/sa/billing?open=' + id); openInvoiceDrawer(id); } else location.hash = '#/sa/billing?open=' + id;
+    },
+    'inv-create': (el, id) => {
+        const i = invById(id), r = createInXero(i); save(); render();
+        toast(r.ok ? `Draft ${i.xero.number} created in Xero. Approve and send it there.` : `Not created in Xero: ${r.why}`);
+    },
+    'inv-edit': (el, id) => openLinesModal(id),
+    'inv-add': (el, id) => openLinesModal(null, id),
+    'inv-refresh': (el, id) => refreshInvoice(id),
+    'inv-cancel': (el, id) => actCancelInv(id),
+    'inv-open-xero': () => ACTIONS['open-xero'](),
+    'inv-sync': (el, id) => {
+        if (!bset().xeroOk) { toast('Xero is not connected, so nothing can be read. Reconnect it in Settings.'); return; }
+        const ch = syncFromXero(invById(id)); save(); render(); toast(ch ? 'Updated from Xero.' : 'Already up to date with Xero.');
+    },
+    'xero-approve': (el, id) => xeroAct(id, 'approve'),
+    'xero-pay': (el, id) => xeroAct(id, 'pay'),
+    'xero-void': (el, id) => xeroAct(id, 'void'),
+    'bill-edit': (el, id) => actBilling(id),
+    'line-add': () => { syncLines(); lineDraft.lines.push({ desc: '', qty: 1, unit: 0 }); renderLines(); const n = lineDraft.lines.length - 1, f = $('#lines-form').elements['desc-' + n]; if (f) f.focus(); },
+    'line-del': (el, id) => { syncLines(); lineDraft.lines.splice(num(id), 1); if (!lineDraft.lines.length) lineDraft.lines.push({ desc: '', qty: 1, unit: 0 }); renderLines(); },
     activate: (el, id) => {
         const c = comp(id); if (!c) return;
         if (!c.activated) { c.activated = true; hist(c, 'Admin activated account', `${c.adminName} set a password`, ''); save(); }
@@ -1494,6 +1952,7 @@ document.addEventListener('submit', e => {
     if (form.dataset.form === 'lead') submitLead(form);
     else if (form.dataset.form === 'agreement') submitAgreement();
     else if (form.dataset.form === 'settings') saveSettings(form);
+    else if (form.dataset.form === 'lines') saveLines();
     else if (form.dataset.form === 'quick' && quickSubmit) {
         const fn = quickSubmit;
         if (fn(new FormData(form)) === false) return;
@@ -1511,6 +1970,7 @@ document.addEventListener('input', e => {
     if (t.dataset && t.dataset.search === 'inq') { ui.inqSearch = t.value; $('#inq-rows').innerHTML = inqRows(); return; }
     if (t.dataset && t.dataset.search === 'cust') { ui.custSearch = t.value; $('#cust-rows').innerHTML = custRows(); return; }
     if (draft && t.closest('#am-form') && !t.dataset.fkey && !t.dataset.funtil) syncAgreementModal();
+    if (lineDraft && t.closest('#lines-form')) { syncLines(); renderLineTotals(); }
 });
 document.addEventListener('change', e => {
     const t = e.target;
