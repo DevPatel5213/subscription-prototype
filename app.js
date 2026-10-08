@@ -12,10 +12,10 @@ const DAY = 86400000;
 const ME = 'Dev Patel';
 
 /* ================= catalogue (mirrors the plan) ================= */
-const PLAN_RANK = { Starter: 1, Professional: 2, Enterprise: 3, Custom: 3 };
+const PLAN_RANK = { Starter: 1, Professional: 2, Enterprise: 3 };
 const LIST_RATE = { Starter: 6, Professional: 10 };            // AUD ex-GST per guard / month
 const TIERS = ['Starter', 'Professional', 'Enterprise'];
-const PLANS = ['Starter', 'Professional', 'Enterprise', 'Custom'];
+const PLANS = ['Starter', 'Professional', 'Enterprise'];   // 'Custom' is a pricing model, never a plan
 
 const FEATURES = [
     { key: 'insighthub', name: 'Insight Hub', cat: 'Core', min: 'Always', desc: 'Operations dashboard and live situation.' },
