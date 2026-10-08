@@ -6,7 +6,7 @@
 'use strict';
 
 const KEY = 'ewf-subscription-prototype';
-const VERSION = 2;
+const VERSION = 3;
 const START_DAY = '2026-10-07';
 const DAY = 86400000;
 const ME = 'Dev Patel';
@@ -114,8 +114,8 @@ const AG_STATUS = { Trial: 'Trial', Active: 'Active', TrialEnded: 'Trial ended',
 // Billing: the app works out the amount; Xero holds the real invoice. `status` is what our app last saw in Xero.
 const INV_KIND = { Initial: 'First invoice', Monthly: 'Monthly usage', Renewal: 'Renewal', Manual: 'One-off' };
 const INV_ST = { Queued: ['Not in Xero', 'p-grey'], Draft: ['Draft in Xero', 'p-blue'], Awaiting: ['Awaiting payment', 'p-violet'], Overdue: ['Overdue', 'p-red'], Paid: ['Paid', 'p-green'], Void: ['Voided', 'p-line'] };
-const XSTATUS = { DRAFT: 'Draft', AUTHORISED: 'Awaiting', PAID: 'Paid', VOIDED: 'Void' };
-const XERO_TEXT = { DRAFT: 'Draft', AUTHORISED: 'Approved and sent: awaiting payment', PAID: 'Paid', VOIDED: 'Voided' };
+const XSTATUS = { DRAFT: 'Draft', SUBMITTED: 'Draft', AUTHORISED: 'Awaiting', PAID: 'Paid', VOIDED: 'Void' };   // DELETED is handled in syncFromXero
+const XERO_TEXT = { DRAFT: 'Draft', SUBMITTED: 'Submitted for approval', AUTHORISED: 'Approved and sent: awaiting payment', PAID: 'Paid', VOIDED: 'Voided', DELETED: 'Deleted in Xero' };
 const MAIL_KIND = { sales: ['Sales', 'p-violet'], customer: ['Customer', 'p-teal'], xero: ['From Xero', 'p-blue'] };
 const TEAM_SIZES = ['1 – 20 employees', '21 – 50 employees', '51 – 200 employees', '200+ employees'];
 const TIMEZONES = ['AUS Eastern Standard Time', 'E. Australia Standard Time', 'Cen. Australia Standard Time', 'W. Australia Standard Time', 'Tasmania Standard Time', 'New Zealand Standard Time'];
@@ -185,8 +185,8 @@ function hist(c, action, detail, reason, at, system) {
 function seed() {
     state = {
         v: VERSION, today: START_DAY, nextId: 100, viewAs: 'c-southern',
-        settings: { salesInbox: 'engageworkforceofficial@gmail.com', minMonthly: 99, annualMonths: 10, notifyCustomers: false, enforce: true, matrix: {},
-            billing: { supplier: 'Engage WorkForce Pty Ltd', xeroOrg: 'Engage WorkForce Pty Ltd (Xero demo company)', xeroOk: true, accountCode: '200', terms: 14, gstRate: 10, billingDay: 1, renewalLeadDays: 30 } },
+        settings: { salesInbox: 'engageworkforceofficial@gmail.com', minMonthly: 99, annualMonths: 10, notifyCustomers: false, enforce: true, matrix: {}, failNextAgreement: false,
+            billing: { supplier: 'Engage WorkForce Pty Ltd', xeroOrg: 'Engage WorkForce Pty Ltd (Xero demo company)', xeroOk: true, accountCode: '200', terms: 14, gstRate: 10, billingDay: 2, renewalLeadDays: 30 } },
         inquiries: [], companies: [], emails: [], jobLog: [], invoices: [], xeroSeq: 40,
     };
     const q = o => state.inquiries.push(Object.assign({ phone: '', teamSize: '', message: '', sourcePage: '/free-trial', notes: '', convertedCompanyId: null, preferredTrialDays: null, createdMs: 0 }, o));
@@ -204,7 +204,7 @@ function seed() {
 
     const har = c({ id: 'c-harbour', name: 'Harbour Guard Services', adminName: 'Priya Nair', adminEmail: 'priya@harbourguard.example', phone: '0419 225 604', createdAt: '2026-07-01', guardsThis: 42, guardsLast: 39,
         billing: { legalName: 'Harbour Guard Services Pty Ltd', email: 'accounts@harbourguard.example', abn: '12 345 678 901', address: '14 Wharf Rd, Newcastle NSW 2300', chargeGst: true, ref: '', xeroContactId: 'XC-harbour' },
-        agreement: agreementDefaults({ plan: 'Professional', status: 'Active', trialStart: '2026-07-01', trialDays: 14, trialEnd: '2026-07-15', subscribedAt: '2026-07-14', model: 'PerGuard', rate: 10, term: 'Monthly', billingNotes: 'Invoice on the 1st, 14-day terms.', inquiryId: 'q-harbour', day3Sent: true, day1Sent: true }) });
+        agreement: agreementDefaults({ plan: 'Professional', status: 'Active', trialStart: '2026-07-01', trialDays: 14, trialEnd: '2026-07-14', subscribedAt: '2026-07-14', model: 'PerGuard', rate: 10, term: 'Monthly', billingNotes: 'Invoice on the 2nd, 14-day terms.', inquiryId: 'q-harbour', day3Sent: true, day1Sent: true }) });
     hist(har, 'Created', 'Trial 14 days · Professional · Per guard $10', 'Created from inquiry (Harbour Guard Services)', '2026-07-01 10:20');
     hist(har, 'Reminder sent', 'Trial ends in 3 days: sales inbox notified', '', '2026-07-12 05:00', true);
     hist(har, 'Converted to paid', 'Status Trial → Active · billed monthly', 'Signed after trial review call', '2026-07-14 15:05');
@@ -215,12 +215,12 @@ function seed() {
     hist(coa, 'Created', 'Active · Professional · Annual licence, 50 guards, $5,000/yr', 'Signed annual licence after demo', '2026-02-01 09:30');
 
     const sou = c({ id: 'c-southern', name: 'Southern Cross Patrols', adminName: 'Mia Thompson', adminEmail: 'mia@southerncross.example', phone: '0422 640 117', createdAt: '2026-09-27', guardsThis: 14, guardsLast: 3,
-        agreement: agreementDefaults({ plan: 'Starter', status: 'Trial', trialStart: '2026-09-27', trialDays: 14, trialEnd: '2026-10-11', model: 'PerGuard', rate: 6, term: 'Monthly', inquiryId: 'q-southern' }),
+        agreement: agreementDefaults({ plan: 'Starter', status: 'Trial', trialStart: '2026-09-27', trialDays: 14, trialEnd: '2026-10-10', model: 'PerGuard', rate: 6, term: 'Monthly', inquiryId: 'q-southern' }),
         overrides: [{ key: 'xero', granted: true, expiresAt: '2026-10-10', reason: 'Show Xero during the trial' }] });
     hist(sou, 'Created', 'Trial 14 days · Starter · Per guard $6; Added Xero integration (until 10 Oct 2026)', 'Created from inquiry (Southern Cross Patrols)', '2026-09-27 11:15');
 
     const met = c({ id: 'c-metro', name: 'Metro Event Security', adminName: "Liam O'Brien", adminEmail: 'liam@metroevents.example', phone: '0455 902 381', createdAt: '2026-09-28', guardsThis: 9, guardsLast: 4,
-        agreement: agreementDefaults({ plan: 'Professional', status: 'TrialEnded', trialStart: '2026-09-28', trialDays: 7, trialEnd: '2026-10-05', model: 'PerGuard', rate: 10, term: 'Monthly', inquiryId: 'q-metro', day3Sent: true, day1Sent: true, endedNotified: true }) });
+        agreement: agreementDefaults({ plan: 'Professional', status: 'TrialEnded', trialStart: '2026-09-28', trialDays: 7, trialEnd: '2026-10-04', model: 'PerGuard', rate: 10, term: 'Monthly', inquiryId: 'q-metro', day3Sent: true, day1Sent: true, endedNotified: true }) });
     hist(met, 'Created', 'Trial 7 days · Professional · Per guard $10', 'Created from inquiry (Metro Event Security)', '2026-09-28 09:40');
     hist(met, 'Trial ended', 'Trial → Trial ended (no subscription yet). Nothing locked.', '', '2026-10-05 05:00', true);
 
@@ -230,12 +230,12 @@ function seed() {
         chargeGst: true, gstRate: 10, status: XSTATUS[xs], blocked: '', sig: agSig(co.agreement), syncedAt: issue + ' 05:00',
         xero: { id: 'xero-' + n, number: 'INV-' + String(n).padStart(4, '0'), status: xs, sentAt: xs === 'DRAFT' ? null : issue, paidAt: paidAt || null } });
     const usage = (n, lab) => [{ desc: `Professional — guards scheduled in ${lab}`, qty: n, unit: 10 }];
-    sinv(har, 'Monthly', '2026-07', 'July 2026', usage(38, 'July 2026'), '2026-08-01', 31, 'PAID', '2026-08-12');
-    sinv(har, 'Monthly', '2026-08', 'August 2026', usage(41, 'August 2026'), '2026-09-01', 36, 'AUTHORISED');
-    sinv(har, 'Monthly', '2026-09', 'September 2026', usage(39, 'September 2026'), '2026-10-01', 39, 'DRAFT');
+    sinv(har, 'Monthly', '2026-07', 'July 2026', usage(38, 'July 2026'), '2026-08-02', 31, 'PAID', '2026-08-12');
+    sinv(har, 'Monthly', '2026-08', 'August 2026', usage(41, 'August 2026'), '2026-09-02', 36, 'AUTHORISED');
+    sinv(har, 'Monthly', '2026-09', 'September 2026', usage(39, 'September 2026'), '2026-10-02', 39, 'DRAFT');
     sinv(coa, 'Initial', 'initial', '12 months from 1 Feb 2026', [{ desc: 'Professional annual licence, up to 50 guards — 12 months from 1 Feb 2026', qty: 1, unit: 5000 }], '2026-02-01', 12, 'PAID', '2026-02-10');
     hist(har, 'Xero update', 'INV-0036: Draft → Awaiting payment (August 2026)', '', '2026-09-02 05:00', true);
-    hist(har, 'Invoice created in Xero', 'INV-0039 · Monthly usage · September 2026 · $429.00 incl. GST · Draft', '', '2026-10-01 05:00', true);
+    hist(har, 'Invoice created in Xero', 'INV-0039 · Monthly usage · September 2026 · $429.00 incl. GST · Draft', '', '2026-10-02 05:00', true);
 
     emailLead(inq('q-redline'), '2026-10-07 09:12');
     emailRequesterConfirm(inq('q-redline'), '2026-10-07 09:12');
@@ -449,8 +449,16 @@ function createInXero(inv, system) {
 // Mock of "read the invoice back from Xero". The nightly job does this for every open invoice.
 function syncFromXero(inv, system) {
     if (!inv.xero || !bset().xeroOk) return false;
-    const next = XSTATUS[inv.xero.status], at = system ? state.today + ' 05:00' : undefined;
+    const at = system ? state.today + ' 05:00' : undefined;
     inv.syncedAt = at || stamp();
+    if (inv.xero.status === 'DELETED') {   // decision 22: back to the queue, a fresh Draft is created the next night
+        const gone = inv.xero.number;
+        inv.xero = null; inv.status = 'Queued'; inv.blocked = 'Draft was deleted in Xero.';
+        hist(comp(inv.companyId), 'Xero update', `${gone}: Draft deleted in Xero, queued again (created again tonight; use Cancel to stop the charge)`, '', at, system);
+        return true;
+    }
+    const next = XSTATUS[inv.xero.status];
+    if (!next) return false;   // unknown status: keep what we had
     if (next === inv.status) return false;
     const was = INV_ST[inv.status][0];
     inv.status = next;
@@ -468,6 +476,7 @@ function emailXeroInvoice(inv) {
         foot: `Sent through Xero on behalf of ${bset().supplier}`,
     }));
 }
+function ordinal(n) { const v = n % 100; return n + (v >= 11 && v <= 13 ? 'th' : ['th', 'st', 'nd', 'rd'][n % 10] || 'th'); }
 function nextBillingDay() {
     const [y, m] = state.today.split('-').map(Number), d = Number(state.today.slice(8));
     const ny = d >= bset().billingDay && m === 12 ? y + 1 : y, nm = d >= bset().billingDay ? (m % 12) + 1 : m;
@@ -481,16 +490,16 @@ function runNightly(day) {
     state.companies.forEach(c => {
         const a = c.agreement;
         if (a && a.status === 'Trial' && a.trialEnd) {
-            const left = diffDays(a.trialEnd, day);
-            if (left <= 0) {
+            const left = diffDays(a.trialEnd, day);   // days until the last day of the trial
+            if (left < 0) {
                 // guarded update: only a row still in Trial can flip, so it never overwrites a "Convert to paid"
                 a.status = 'TrialEnded';
                 if (!a.endedNotified) { a.endedNotified = true; ended.push(c); }
                 hist(c, 'Trial ended', 'Trial → Trial ended (no subscription yet). Nothing locked.', '', t, true);
             } else if (left <= 1) {
-                if (!a.day1Sent) { a.day1Sent = true; a.day3Sent = true; due1.push(c); hist(c, 'Reminder sent', 'Trial ends tomorrow: sales inbox notified', '', t, true); }
+                if (!a.day1Sent) { a.day1Sent = true; a.day3Sent = true; due1.push(c); hist(c, 'Reminder sent', `Trial's last day is ${left === 0 ? 'today' : 'tomorrow'}: sales inbox notified`, '', t, true); }
             } else if (left <= 3) {
-                if (!a.day3Sent) { a.day3Sent = true; due3.push(c); hist(c, 'Reminder sent', `Trial ends in ${left} days: sales inbox notified`, '', t, true); }
+                if (!a.day3Sent) { a.day3Sent = true; due3.push(c); hist(c, 'Reminder sent', `Trial's last day is in ${left} days: sales inbox notified`, '', t, true); }
             }
         }
         c.overrides.forEach(o => {
@@ -550,7 +559,7 @@ function runNightly(day) {
         const a = c.agreement;
         pushEmail(state.settings.salesInbox, `Trial ended, follow up now — ${c.name}`, 'sales', emailBody({
             alert: 'Trial ended', h1: `The trial for ${c.name} has ended`,
-            rows: [['Admin', c.adminName], ['Phone', c.phone], ['Email', c.adminEmail], ['Plan', a.plan], ['Trial', `${a.trialDays} days, ${fmtDate(a.trialStart)} – ${fmtDate(addDays(a.trialEnd, -1))}`], ['Guards scheduled', `${c.guardsThis} this month`]],
+            rows: [['Admin', c.adminName], ['Phone', c.phone], ['Email', c.adminEmail], ['Plan', a.plan], ['Trial', `${a.trialDays} days, ${fmtDate(a.trialStart)} – ${fmtDate(a.trialEnd)}`], ['Guards scheduled', `${c.guardsThis} this month`]],
             paras: ['Nothing has been locked. Convert to paid, extend the trial, or mark the inquiry Lost.'],
             button: { label: 'Open in SuperAdmin › Customers', act: 'goto-cust', id: c.id },
         }), t);
@@ -562,7 +571,7 @@ function runNightly(day) {
         }), t));
         ended.forEach(c => pushEmail(c.adminEmail, 'Your Engage WorkForce trial has ended', 'customer', emailBody({
             kicker: 'Your free trial', h1: "Your trial has ended — let's talk",
-            paras: [`Your trial for ${c.name} ended on ${fmtDate(c.agreement.trialEnd)}. You can still log in; nothing has been locked or deleted.`, "We'll call you to talk about the right plan."],
+            paras: [`Your trial for ${c.name} ended (the last day was ${fmtDate(c.agreement.trialEnd)}). You can still log in; nothing has been locked or deleted.`, "We'll call you to talk about the right plan."],
         }), t));
     }
     const summary = `${fmtDate(day)}: ${due3.length + due1.length} reminder(s), ${ended.length} trial(s) ended, ${expiring.length} override(s) expiring, ${billed} invoice(s) created, ${bill.length} billing item(s)`;
@@ -582,12 +591,13 @@ function advance(days) {
 /* ================= descriptive helpers ================= */
 function statusInfo(c) {
     const a = c.agreement;
+    if (!a && agreementMissing(c)) return { label: 'Agreement missing', cls: 'p-orange', sub: 'Create failed half-way: attach the agreement', warn: true };
     if (!a) return { label: 'Existing customer', cls: 'p-slate', sub: 'No agreement: every feature on' };
     if (a.status === 'Trial') {
-        const day = diffDays(state.today, a.trialStart) + 1, left = diffDays(a.trialEnd, state.today);
-        return { label: `Trial — day ${Math.max(1, day)} of ${a.trialDays}`, cls: 'p-teal', sub: `Ends ${fmtDate(a.trialEnd)} · ${plural(left, 'day')} left`, warn: left <= 3 };
+        const day = diffDays(state.today, a.trialStart) + 1, left = diffDays(a.trialEnd, state.today) + 1;   // including today
+        return { label: `Trial — day ${Math.max(1, day)} of ${a.trialDays}`, cls: 'p-teal', sub: `Last day ${fmtDate(a.trialEnd)} · ${plural(left, 'day')} left`, warn: left <= 4 };
     }
-    if (a.status === 'TrialEnded') return { label: 'Trial ended', cls: 'p-orange', sub: `Ended ${fmtDate(a.trialEnd)}: follow up`, warn: true };
+    if (a.status === 'TrialEnded') return { label: 'Trial ended', cls: 'p-orange', sub: `Last day was ${fmtDate(a.trialEnd)}: follow up`, warn: true };
     if (a.status === 'Active') return { label: 'Active', cls: 'p-green', sub: a.subscribedAt ? `Since ${fmtDate(a.subscribedAt)}` : '' };
     if (a.status === 'Suspended') return { label: 'Suspended', cls: 'p-red', sub: 'Label only: login still works' };
     return { label: 'Cancelled', cls: 'p-grey', sub: 'Label only: login still works' };
@@ -608,7 +618,7 @@ function monthlyRecurring(c) {
     const a = c.agreement; if (!a || a.status !== 'Active') return 0;
     return priceOf(c).monthly;
 }
-function trialLastDay(d) { return d.trialEnd ? addDays(d.trialEnd, -1) : ''; }
+function trialLastDay(d) { return d.trialEnd || ''; }   // trialEnd is already the last day included
 
 /* ================= chrome ================= */
 function section(path) {
@@ -676,7 +686,7 @@ function viewOverview() {
         ['I1', 'GST', `${bset().gstRate}% added on top; a tick per customer turns it off`, 'Customer › Billing'],
         ['I3', 'Invoicing system', "Xero (Engage WorkForce's own org): the app creates a Draft, you approve and send it in Xero", 'SuperAdmin › Billing'],
         ['I4', 'Payment terms', `${bset().terms} days`, 'Settings'],
-        ['I5–I7', 'When invoices are made', `Prepaid: on Convert to paid. Per guard: on the ${bset().billingDay}${bset().billingDay === 1 ? 'st' : 'th'} for last month. Renewals: ${bset().renewalLeadDays} days before`, 'Convert to paid · +1 day'],
+        ['I5–I7', 'When invoices are made', `Prepaid: on Convert to paid. Per guard: on the ${ordinal(bset().billingDay)} for last month. Renewals: ${bset().renewalLeadDays} days before`, 'Convert to paid · +1 day'],
         ['I8', 'Overdue', 'A label and a digest line. Never locks anyone', 'SuperAdmin › Billing'],
         ['I9', 'Needed before Xero', 'Billing name and email; ABN from $1,000', 'Customer › Billing details'],
         ['I14', 'Online payment', 'None built: Xero\'s own "Pay now" if their Xero has it on', '—'],
@@ -708,7 +718,7 @@ function viewOverview() {
                 <li>Settings → turn page enforcement off: nothing is hidden (how it ships until the click-through).</li>
                 <li><a href="#/sa/billing">Billing</a>: Harbour's August invoice is overdue and September is a Draft in Xero. Open September → <b>Act as Xero</b> → Approve, then Record payment, then <b>Sync from Xero</b>.</li>
                 <li>Create a customer from the Redline inquiry as <b>Paid</b> on an <b>Annual licence</b>: a Draft is created in Xero straight away. Clear the billing email or leave the ABN blank on a $1,000+ invoice to see it wait with a reason.</li>
-                <li>Press <b>+1 day</b> until 1 Nov: Harbour gets October's usage invoice as a Draft in Xero, once. Settings → <b>Xero connection lapsed</b> first: it waits, and is retried the night after you reconnect.</li>
+                <li>Press <b>+1 day</b> until 2 Nov: Harbour gets October's usage invoice as a Draft in Xero, once. Settings → <b>Xero connection lapsed</b> first: it waits, and is retried the night after you reconnect.</li>
             </ol></div></div>
             <div class="box"><div class="box-h"><h3>Open decisions shown here</h3></div><div class="tbl-wrap"><table class="tbl">
                 <thead><tr><th>#</th><th>Decision</th><th>Shown as</th><th>Try it in</th></tr></thead>
@@ -994,16 +1004,18 @@ function openInquiryDrawer(id) {
 }
 
 /* ================= views: SuperAdmin › Customers ================= */
-function custFilterOf(c) { return c.agreement ? c.agreement.status : 'Existing'; }
+// no agreement but an inquiry points at it = a create that failed half-way (a real existing customer has no inquiry)
+function agreementMissing(c) { return !c.agreement && state.inquiries.some(q => q.convertedCompanyId === c.id); }
+function custFilterOf(c) { return c.agreement ? c.agreement.status : agreementMissing(c) ? 'AgreementMissing' : 'Existing'; }
 function viewCustomers() {
     const cs = state.companies;
     const trials = cs.filter(c => c.agreement && c.agreement.status === 'Trial');
     const soon = trials.filter(c => diffDays(c.agreement.trialEnd, state.today) <= 3).length;
     const ended = cs.filter(c => c.agreement && c.agreement.status === 'TrialEnded').length;
     const active = cs.filter(c => c.agreement && c.agreement.status === 'Active');
-    const existing = cs.filter(c => !c.agreement).length;
+    const existing = cs.filter(c => !c.agreement && !agreementMissing(c)).length;
     const mrr = active.reduce((t, c) => t + monthlyRecurring(c), 0);
-    const filters = [['All', 'All'], ['Trial', 'Trial'], ['TrialEnded', 'Trial ended'], ['Active', 'Active'], ['Suspended', 'Suspended'], ['Cancelled', 'Cancelled'], ['Existing', 'Existing customer']];
+    const filters = [['All', 'All'], ['Trial', 'Trial'], ['TrialEnded', 'Trial ended'], ['Active', 'Active'], ['Suspended', 'Suspended'], ['Cancelled', 'Cancelled'], ['Existing', 'Existing customer'], ['AgreementMissing', 'Agreement missing']];
     return saChrome('customers') + `<div class="page">
         <div class="page-head">
             <div><div class="eyebrow">SuperAdmin</div><h1>Customers</h1><p>Every company, its agreement, trial and how many guards it schedules. Invoices are raised in Xero from the Billing tab.</p></div>
@@ -1074,12 +1086,13 @@ function openCustomerDrawer(id) {
                 <dt>Activated</dt><dd>${c.activated ? 'Yes' : '<span class="warn-text">Not yet: waiting for the activation link</span>'}</dd><dt>Created</dt><dd>${fmtDate(c.createdAt)}</dd></dl>
             <div class="sec-title">Agreement</div>
             ${a ? `<dl class="dl"><dt>Plan</dt><dd>${esc(a.plan)}</dd><dt>Status</dt><dd>${esc(AG_STATUS[a.status])}</dd>
-                ${a.trialStart ? `<dt>Trial</dt><dd>${a.trialDays} days · ${fmtDate(a.trialStart)} – ${fmtDate(addDays(a.trialEnd, -1))}</dd>` : ''}
+                ${a.trialStart ? `<dt>Trial</dt><dd>${a.trialDays} days · ${fmtDate(a.trialStart)} – ${fmtDate(a.trialEnd)}</dd>` : ''}
                 ${a.subscribedAt ? `<dt>Paying since</dt><dd>${fmtDate(a.subscribedAt)}</dd>` : ''}
                 <dt>Pricing model</dt><dd>${esc(MODEL[a.model])}</dd><dt>Price</dt><dd>${esc(priceLine(c))}</dd>
                 <dt>Renewal</dt><dd>${a.renewalDate ? fmtDate(a.renewalDate) : (a.status === 'Active' ? 'Monthly' : '—')}</dd>
                 <dt>Billing notes</dt><dd>${esc(a.billingNotes || '—')}</dd>
                 <dt>Inquiry</dt><dd>${q ? `<a href="#/sa/inquiries?open=${q.id}">${esc(q.companyName)} · ${esc(fmtStamp(q.createdAt))}</a>` : '—'}</dd></dl>`
+                : agreementMissing(c) ? '<div class="warn-box"><b>Agreement missing.</b> This company was created from an inquiry but its agreement did not save, so no activation email was sent. Press <b>Attach agreement</b> to finish.</div>'
                 : '<p class="muted">No agreement. Shown as "Existing customer": every feature is on and nothing changes for them.</p>'}
             ${a ? billingSection(c, btn) : ''}
             <div class="sec-title">Guards scheduled</div>
@@ -1127,6 +1140,12 @@ function openAgreementModal(mode, opts) {
         overrides: c ? clone(c.overrides) : [], reason: '', prevPlan: plan,
         billName: '', billEmail: '', billAbn: '', billGst: true, prevCountry: 'Australia',
     };
+    if (mode === 'attach' && c && c.pendingDraft) {   // after a failed create: reopen with what was typed
+        const pd = c.pendingDraft;
+        ['inquiryId', 'plan', 'trialDays', 'model', 'rate', 'minMonthly', 'term', 'includedGuards', 'guards', 'annualAmount', 'billingNotes', 'overrides', 'billName', 'billEmail', 'billAbn', 'billGst']
+            .forEach(k => { if (pd[k] !== undefined) draft[k] = clone(pd[k]); });
+        draft.status = pd.start === 'Trial' ? 'Trial' : 'Active'; draft.prevPlan = draft.plan;
+    }
     const title = mode === 'create' ? 'Create customer account' : mode === 'attach' ? `Attach agreement — ${c.name}` : `Edit agreement — ${c.name}`;
     const opt = (list, val, labels) => list.map(v => `<option value="${esc(v)}" ${String(v) === String(val) ? 'selected' : ''}>${esc(labels ? labels[v] : v)}</option>`).join('');
     showModal(`<div class="modal-h"><h3>${esc(title)}</h3><button class="x" data-act="close-modal" aria-label="Close">×</button></div>
@@ -1173,7 +1192,7 @@ function openAgreementModal(mode, opts) {
                     <div class="fld" data-show="guards"><label for="am-guards">Expected guards / month (for the preview)</label><input class="in" id="am-guards" name="guards" type="number" min="0" value="${esc(draft.guards)}"></div>
                 </div>
                 <div class="fld" data-show="annual"><label for="am-annual" id="am-annual-label">Negotiated annual amount ($, optional)</label><input class="in" id="am-annual" name="annualAmount" type="number" min="0" value="${esc(draft.annualAmount)}"><span class="hint" id="am-annual-hint">Leave blank to use the formula.</span></div>
-                <div class="fld"><label for="am-notes">Billing notes</label><textarea class="in" id="am-notes" name="billingNotes" placeholder="e.g. Invoice on the 1st, 14-day terms">${esc(draft.billingNotes)}</textarea></div>
+                <div class="fld"><label for="am-notes">Billing notes</label><textarea class="in" id="am-notes" name="billingNotes" placeholder="e.g. Invoice on the 2nd, 14-day terms">${esc(draft.billingNotes)}</textarea></div>
                 <div id="am-preview"></div>
                 <div class="fld"><label for="am-reason">Reason <span id="am-reason-req" class="req"></span></label><textarea class="in" id="am-reason" name="reason" placeholder="Saved to the customer's history">${esc(draft.reason)}</textarea>
                     <span class="hint">Required when the price or features differ from the list price, and for every change to an existing agreement.</span></div>
@@ -1184,10 +1203,10 @@ function openAgreementModal(mode, opts) {
     syncAgreementModal(true);
 }
 function draftTrialEnd() {
-    if (draft.mode === 'create') return addDays(state.today, num(draft.trialDays));
+    if (draft.mode === 'create') return addDays(state.today, num(draft.trialDays) - 1);   // last day included
     const c = comp(draft.companyId), a = c && c.agreement;
     const start = a && a.trialStart ? a.trialStart : state.today;
-    return addDays(start, num(draft.trialDays));
+    return addDays(start, num(draft.trialDays) - 1);
 }
 const isTrialDraft = () => draft.mode === 'create' ? draft.start === 'Trial' : draft.status === 'Trial';
 function needsReason() {
@@ -1225,7 +1244,7 @@ function syncAgreementModal(first) {
     $('#am-annual-hint').textContent = m === 'Custom' ? 'Required for a custom agreement.' : 'Overrides the formula. Needs a reason.';
     const list = LIST_RATE[draft.plan];
     $('#am-rate-hint').textContent = list ? `List price ${money(list)}${num(draft.rate) && num(draft.rate) !== list ? ` · ${num(draft.rate) < list ? 'below' : 'above'} list` : ''}` : 'No list price: agree one with the customer';
-    $('#am-trial-hint').textContent = show.trial ? `Ends ${fmtDate(draftTrialEnd())} (last day ${fmtDate(addDays(draftTrialEnd(), -1))})` : '';
+    $('#am-trial-hint').textContent = show.trial ? `Last day ${fmtDate(draftTrialEnd())}` : '';
     $('#am-reason-req').textContent = needsReason() ? '*' : '';
     renderPreview();
     if (first) renderFeaturePanel();
@@ -1323,12 +1342,25 @@ function submitAgreement() {
             country: d.country, timeZone: d.timeZone, createdAt: state.today, activated: false });
         c.agreement = agreementDefaults(Object.assign({}, terms, {
             status: trial ? 'Trial' : 'Active', trialStart: trial ? state.today : null, trialDays: trial ? num(d.trialDays) : null,
-            trialEnd: trial ? addDays(state.today, num(d.trialDays)) : null, subscribedAt: trial ? null : state.today,
+            trialEnd: trial ? addDays(state.today, num(d.trialDays) - 1) : null, subscribedAt: trial ? null : state.today,
             renewalDate: !trial && prepaid ? addDays(state.today, 365) : null, inquiryId: d.inquiryId,
         }));
         c.overrides = ovs;
         c.billing = { legalName: d.billName.trim() || c.name, email: d.billEmail.trim() || c.adminEmail, abn: d.billAbn.trim(), address: '', chargeGst: d.billGst, ref: '', xeroContactId: null };
         const q = d.inquiryId && inq(d.inquiryId);
+        if (state.settings.failNextAgreement) {   // demo switch: ProvisionAsync committed, the agreement save failed
+            state.settings.failNextAgreement = false;
+            c.agreement = null; c.overrides = []; c.activationHeld = true;
+            c.pendingDraft = clone(d);           // so Attach agreement opens with what was typed
+            if (q) q.convertedCompanyId = c.id;  // saved on its own before the agreement, so the company can be found
+            hist(c, 'Created (agreement missing)', 'Company, admin login and staff record created. The agreement did not save. No activation email sent.', d.reason.trim() || (q ? `Created from inquiry (${q.companyName})` : 'Created by SuperAdmin'));
+            state.companies.unshift(c);
+            save(); closeModal();
+            quickModal(`Agreement didn't save — ${c.name}`, `<div class="warn-box"><b>Company created, but the agreement didn't save.</b><br>No activation email has been sent, so nobody is using the account yet. Use <b>Attach agreement</b> to finish; it opens with what you typed and sends the activation email when it saves.</div><p class="sub">Prototype: this was the "agreement fails to save" switch in Settings. It has turned itself off.</p>`,
+                'Attach agreement', 'btn-p', () => { setTimeout(() => openAgreementModal('attach', { companyId: c.id }), 0); });
+            render();
+            return;
+        }
         const detail = [`${trial ? `Trial ${c.agreement.trialDays} days` : 'Paid subscription'} · ${d.plan} · ${priceLine(c)}`, ...overrideDetail(ovs, d.plan)].join('; ');
         hist(c, 'Created', detail, d.reason.trim() || (q ? `Created from inquiry (${q.companyName})` : 'Created by SuperAdmin'));
         state.companies.unshift(c);
@@ -1350,8 +1382,8 @@ function submitAgreement() {
         const newStatus = d.status;
         if (newStatus === 'Trial') {
             if (!a.trialStart) a.trialStart = state.today;
-            a.trialDays = num(d.trialDays); a.trialEnd = addDays(a.trialStart, a.trialDays);
-            if (a.trialEnd > state.today) { a.day3Sent = false; a.day1Sent = false; a.endedNotified = false; }
+            a.trialDays = num(d.trialDays); a.trialEnd = addDays(a.trialStart, a.trialDays - 1);
+            if (a.trialEnd >= state.today) { a.day3Sent = false; a.day1Sent = false; a.endedNotified = false; }
         }
         if (newStatus === 'Active' && (!old || old.status !== 'Active') && !a.subscribedAt) a.subscribedAt = state.today;
         if (newStatus === 'Active' && prepaid && !a.renewalDate) a.renewalDate = addDays(a.subscribedAt || state.today, 365);
@@ -1362,7 +1394,13 @@ function submitAgreement() {
         hist(c, d.mode === 'attach' ? 'Agreement attached' : 'Agreement updated', lines.join('; ') || 'No changes', d.reason.trim());
         const q = a.inquiryId && inq(a.inquiryId);
         if (q && newStatus === 'Active') q.status = 'Won';
-        toast(`${c.name} saved.`);
+        if (q && newStatus === 'Trial') q.status = 'TrialActive';
+        if (c.activationHeld) {   // the create failed half-way: the activation email was held back until now
+            c.activationHeld = false; delete c.pendingDraft;
+            emailActivation(c);
+            if (newStatus === 'Trial') emailTrialReady(c); else emailAccountReady(c);
+            toast(`${c.name} saved. Activation and "${newStatus === 'Trial' ? 'trial ready' : 'account ready'}" emails sent.`);
+        } else toast(`${c.name} saved.`);
     }
     save(); closeModal();
     location.hash = '#/sa/customers?open=' + c.id;
@@ -1416,8 +1454,8 @@ function actExtend(id) {
         if (!(add > 0)) { $('#qm-errors').innerHTML = '<div class="errors">Enter the number of days.</div>'; return false; }
         const oldEnd = a.trialEnd, wasEnded = a.status === 'TrialEnded';
         // extending an ended trial restarts the clock from today so it isn't still in the past
-        const base = wasEnded && a.trialEnd <= state.today ? state.today : a.trialEnd;
-        a.trialEnd = addDays(base, add); a.trialDays = diffDays(a.trialEnd, a.trialStart);
+        const base = wasEnded && a.trialEnd < state.today ? addDays(state.today, -1) : a.trialEnd;
+        a.trialEnd = addDays(base, add); a.trialDays = diffDays(a.trialEnd, a.trialStart) + 1;
         a.status = 'Trial'; a.day3Sent = false; a.day1Sent = false; a.endedNotified = false;
         hist(c, 'Trial extended', `+${add} days · ends ${fmtDate(oldEnd)} → ${fmtDate(a.trialEnd)}${wasEnded ? ' · Trial ended → Trial' : ''}`, reason);
         toast(`Trial for ${c.name} now ends ${fmtDate(a.trialEnd)}.`);
@@ -1526,7 +1564,7 @@ function openInvoiceDrawer(id) {
     ].filter(Boolean);
     showDrawer(`<div class="drawer-h"><div><div class="sub" style="color:#c7d4ff">${esc(INV_KIND[i.kind])} · ${esc(i.periodLabel)}</div><h3>${esc(c.name)}</h3><div style="margin-top:6px">${pill(l, cls)} <span class="sub" style="color:#c7d4ff">${x ? esc(x.number) + ' in Xero' : 'Not in Xero yet'}</span></div></div><button class="x" data-act="close-drawer" aria-label="Close">×</button></div>
         <div class="drawer-b">
-            ${i.blocked ? `<div class="warn-box"><b>Waiting: ${esc(i.blocked)}</b><br>${i.blocked.startsWith('Missing') ? `Add it in <a href="#/sa/customers?open=${c.id}">the customer's billing details</a>, then press Create draft in Xero. It is also retried each night.` : 'Reconnect Xero (Settings). It is retried each night, so nothing is lost.'}</div>` : ''}
+            ${i.blocked ? `<div class="warn-box"><b>Waiting: ${esc(i.blocked)}</b><br>${i.blocked.startsWith('Draft was deleted') ? 'It is created again in Xero tonight. To stop this charge, press <b>Cancel</b> instead.' : i.blocked.startsWith('Missing') ? `Add it in <a href="#/sa/customers?open=${c.id}">the customer's billing details</a>, then press Create draft in Xero. It is also retried each night.` : 'Reconnect Xero (Settings). It is retried each night, so nothing is lost.'}</div>` : ''}
             ${stale ? '<div class="info">The agreement price changed after this was created. Refresh to rebuild the lines from the current agreement.</div>' : ''}
             ${behind ? `<div class="info">Xero now shows this as <b>${esc(XERO_TEXT[x.status])}</b>. Press <b>Sync from Xero</b> (it also runs every night).</div>` : ''}
             <div class="btn-row" style="margin-bottom:16px">${actions.join('')}</div>
@@ -1540,11 +1578,11 @@ function openInvoiceDrawer(id) {
             <dl class="dl"><dt>Bill to</dt><dd>${esc(b.legalName)}</dd><dt>Billing email</dt><dd>${esc(b.email)}</dd><dt>ABN</dt><dd>${b.abn ? esc(b.abn) : '—'}</dd>
                 <dt>Issued</dt><dd>${fmtDate(i.issueDate)}</dd><dt>Due</dt><dd>${fmtDate(i.dueDate)} · ${bset().terms} day terms${k === 'Overdue' ? ` · <span class="warn-text">${plural(diffDays(state.today, i.dueDate), 'day')} overdue</span>` : ''}</dd></dl>
             <div class="sec-title">In Xero</div>
-            ${x ? `<dl class="dl"><dt>Xero number</dt><dd>${esc(x.number)}</dd><dt>Status in Xero</dt><dd>${esc(XERO_TEXT[x.status])}</dd>
+            ${x ? `<dl class="dl"><dt>Xero number</dt><dd>${esc(x.number)}</dd><dt>Reference</dt><dd class="mono">EWF-${esc(i.kind)}-${esc(i.periodKey)}</dd><dt>Status in Xero</dt><dd>${esc(XERO_TEXT[x.status])}</dd>
                 <dt>Our app last saw</dt><dd>${esc(INV_ST[i.status][0])} · ${esc(fmtStamp(i.syncedAt))}</dd>${x.sentAt ? `<dt>Sent from Xero</dt><dd>${fmtDate(x.sentAt)}</dd>` : ''}${x.paidAt ? `<dt>Paid</dt><dd>${fmtDate(x.paidAt)}</dd>` : ''}</dl>`
                 : '<p class="muted">Not created in Xero yet. <b>Create draft in Xero</b> pushes it as a Draft; you approve and send it there.</p>'}
             ${x && ['DRAFT', 'AUTHORISED'].includes(x.status) ? `<div class="proto-note"><b class="tag">PROTOTYPE</b>Act as Xero. In the real product these happen inside Xero, not here.
-                <div class="btn-row" style="margin-top:8px">${x.status === 'DRAFT' ? btn('xero-approve', 'Approve and email to client') : btn('xero-pay', 'Record payment')}${btn('xero-void', 'Void in Xero', 'btn-danger')}</div></div>` : ''}
+                <div class="btn-row" style="margin-top:8px">${x.status === 'DRAFT' ? btn('xero-approve', 'Approve and email to client') + btn('xero-delete', 'Delete draft in Xero', 'btn-danger') : btn('xero-pay', 'Record payment')}${btn('xero-void', 'Void in Xero', 'btn-danger')}</div></div>` : ''}
         </div>`);
 }
 function billingSection(c, btn) {   // the "Billing" block inside the customer drawer
@@ -1658,6 +1696,7 @@ function xeroAct(id, what) {   // prototype-only: stands in for someone working 
     if (what === 'approve' && x.status === 'DRAFT') { x.status = 'AUTHORISED'; x.sentAt = state.today; emailXeroInvoice(i); toast(`Approved in Xero and emailed to ${billOf(c).email}. Our app sees it at the next sync.`); }
     else if (what === 'pay' && x.status === 'AUTHORISED') { x.status = 'PAID'; x.paidAt = state.today; toast('Payment recorded in Xero. Our app sees it at the next sync.'); }
     else if (what === 'void' && ['DRAFT', 'AUTHORISED'].includes(x.status)) { x.status = 'VOIDED'; toast('Voided in Xero. Our app sees it at the next sync.'); }
+    else if (what === 'delete' && x.status === 'DRAFT') { x.status = 'DELETED'; toast('Draft deleted in Xero. At the next sync our app puts it back in the queue and creates it again.'); }
     save(); render();
 }
 
@@ -1771,6 +1810,8 @@ function openSettings() {
             </div>
             <div class="fld"><span class="lbl">Xero connection: ${esc(s.billing.xeroOrg)}</span>
                 <label class="check"><input type="checkbox" name="xeroLapsed" ${s.billing.xeroOk ? '' : 'checked'}>Simulate: the Xero connection has lapsed (new invoices wait as "Not in Xero" and are retried each night)</label></div>
+            <div class="fld"><span class="lbl">Create customer</span>
+                <label class="check"><input type="checkbox" name="failNextAgreement" ${s.failNextAgreement ? 'checked' : ''}>Simulate: the next customer's agreement fails to save (the company is created, no activation email is sent, and it shows as "Agreement missing"). Turns itself off after one use.</label></div>
             <div class="sec-title">Feature matrix (decision 9)</div>
             <div class="tbl-wrap" style="max-height:340px;overflow-y:auto"><table class="tbl"><thead><tr><th>Feature</th><th>Group</th><th>Included from</th></tr></thead><tbody>
                 ${gated.map(f => `<tr><td>${esc(f.name)}${minPlanOf(f) !== f.min ? ' ' + pill('changed', 'p-violet') : ''}</td><td class="muted">${esc(f.cat)}</td><td><select class="in" name="m-${f.key}" aria-label="${esc(f.name)} included from">${TIERS.map(t => `<option ${t === minPlanOf(f) ? 'selected' : ''}>${t}</option>`).join('')}</select></td></tr>`).join('')}
@@ -1791,9 +1832,10 @@ function saveSettings(form) {
     b.accountCode = String(fd.get('accountCode') || '').trim() || '200';
     b.terms = clampInt(fd.get('terms'), 1, 90, 14);
     if (String(fd.get('gstRate')).trim() !== '') b.gstRate = Math.min(30, Math.max(0, num(fd.get('gstRate'))));
-    b.billingDay = clampInt(fd.get('billingDay'), 1, 28, 1);
+    b.billingDay = clampInt(fd.get('billingDay'), 1, 28, 2);
     b.renewalLeadDays = clampInt(fd.get('renewalLeadDays'), 1, 400, 30);
     b.xeroOk = !fd.has('xeroLapsed');
+    s.failNextAgreement = fd.has('failNextAgreement');
     s.matrix = {};
     SELLABLE.filter(f => f.min !== 'Always').forEach(f => { const v = String(fd.get('m-' + f.key)); if (v && v !== f.min) s.matrix[f.key] = v; });
     save(); closeModal(); render(); toast('Settings saved.');
@@ -1894,6 +1936,7 @@ const ACTIONS = {
     'xero-approve': (el, id) => xeroAct(id, 'approve'),
     'xero-pay': (el, id) => xeroAct(id, 'pay'),
     'xero-void': (el, id) => xeroAct(id, 'void'),
+    'xero-delete': (el, id) => xeroAct(id, 'delete'),
     'bill-edit': (el, id) => actBilling(id),
     'line-add': () => { syncLines(); lineDraft.lines.push({ desc: '', qty: 1, unit: 0 }); renderLines(); const n = lineDraft.lines.length - 1, f = $('#lines-form').elements['desc-' + n]; if (f) f.focus(); },
     'line-del': (el, id) => { syncLines(); lineDraft.lines.splice(num(id), 1); if (!lineDraft.lines.length) lineDraft.lines.push({ desc: '', qty: 1, unit: 0 }); renderLines(); },
@@ -1931,7 +1974,7 @@ const ACTIONS = {
         save(); $('#cust-rows').innerHTML = custRows(); openCustomerDrawer(id); toast('Usage updated.');
     },
     'fp-reset': () => { draft.overrides = []; renderFeaturePanel(); },
-    'fp-trial-end': (el, key) => { const o = draft.overrides.find(x => x.key === key); if (o) { o.expiresAt = addDays(draftTrialEnd(), -1); renderFeaturePanel(); } },
+    'fp-trial-end': (el, key) => { const o = draft.overrides.find(x => x.key === key); if (o) { o.expiresAt = draftTrialEnd(); renderFeaturePanel(); } },
     'request-feature': (el, key) => requestFeature(key),
     'matrix-reset': () => { $$('#st-form select[name^="m-"]').forEach(s => { s.value = BY_KEY[s.name.slice(2)].min; }); },
 };
